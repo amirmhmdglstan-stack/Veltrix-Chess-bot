@@ -124,7 +124,7 @@ private:
 };
 
 // Zobrist random numbers (deterministic build, fixed seed generation)
-extern U64 ZobristPiece[PIECE_NB][64];
+extern U64 ZobristPiece[16][64];  // rows 12..15 zero-filled sentinel guards (see position.cpp)
 extern U64 ZobristSide;
 extern U64 ZobristCastling[16];
 extern U64 ZobristEp[8];

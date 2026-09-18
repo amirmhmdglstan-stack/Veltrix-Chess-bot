@@ -121,7 +121,6 @@ PawnEntry eval_pawns(const Position& pos) {
 // --------------------------------------------------------------------------
 template <Color Us>
 int king_shelter(const Position& pos) {
-    constexpr Color Them = ~Us;
     const int ksq = pos.king_sq(Us);
     const int kf = file_of(ksq);
     const int kr = rank_of(ksq);
@@ -232,7 +231,7 @@ int mop_up_bonus(const Position& pos, int phase, std::ostringstream* os) {
         // forms the "box" used to shepherd the bare king to the edge.
         U64 sliders = pos.pieces(strong, ROOK) | pos.pieces(strong, QUEEN);
         while (sliders) {
-            int r = BB::pop_lsb(sliders);
+            int r = BB::pop_lsb_sq(sliders);
             int rf = file_of(r), rr = rank_of(r);
             int t;
             t = (rank_of(wk) - rr) * (rank_of(sk) - rr);

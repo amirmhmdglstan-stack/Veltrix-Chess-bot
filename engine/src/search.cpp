@@ -50,6 +50,11 @@ struct RootMove {
     Value score = -VALUE_MAX;
     Value prevScore = -VALUE_MAX;
     std::vector<Move> pv;
+
+    RootMove() = default;
+    // explicit ctor: initialising only the move is our standard case; keeps
+    // -Wmissing-field-initializers quiet without hiding any real issue
+    explicit RootMove(Move m) : move(m) {}
 };
 
 int value_of_pt(PieceType pt) {
@@ -785,11 +790,11 @@ void choose_best_and_print(SearchThread& main) {
     if (gCfg.limitStrength && !main.rootMoves.empty()) {
         std::stable_sort(main.rootMoves.begin(), main.rootMoves.end(),
                          [](const RootMove& a, const RootMove& b) { return a.score > b.score; });
-        const Value best = main.rootMoves[0].score;
+        const Value topScore = main.rootMoves[0].score;
         const int budget = std::max(15, (2850 - gCfg.elo) / 4);   // cp of slack
         std::vector<const RootMove*> cands;
         for (const auto& rm : main.rootMoves) {
-            if (rm.move != MOVE_NONE && rm.score >= best - budget && rm.score > mated_in(0))
+            if (rm.move != MOVE_NONE && rm.score >= topScore - budget && rm.score > mated_in(0))
                 cands.push_back(&rm);
         }
         if (!cands.empty()) {

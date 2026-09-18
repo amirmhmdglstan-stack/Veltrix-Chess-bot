@@ -349,21 +349,27 @@ void cmd_bench(const std::vector<std::string>& tokens) {
         auto p1 = std::chrono::steady_clock::now();
         U64 n = Search::nodes_total();
         totalNodes += n;
-        long ms = std::chrono::duration_cast<std::chrono::milliseconds>(p1 - p0).count();
-        std::printf("%-72s bestmove %-5s nodes %12llu time %6ld ms\n",
+        // duration::rep is int64_t; store/print as long long (lossless implicit
+        // conversion) so the code is well-typed on LP64 AND LLP64 (Windows).
+        const long long ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(p1 - p0).count();
+        std::printf("%-72s bestmove %-5s nodes %12llu time %6lld ms\n",
                     fen.substr(0, 60).c_str(), move_to_str(bm).c_str(),
                     (unsigned long long)n, ms);
         std::fflush(stdout);
     }
     auto t1 = std::chrono::steady_clock::now();
-    long totalMs = std::max(1L, std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+    // std::max<T> explicitly over duration rep (int64_t == long long on LLP64
+    // Windows, long on LP64 Linux) - deduction used to fail on MSYS2/MSVC.
+    const long long totalMs = std::max<long long>(
+        1LL, std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
     SearchConfig show = Search::config();
     show.showInfo = true;
     Search::configure(show);
     std::printf("===========================\n");
-    std::printf("Total time : %ld ms\n", totalMs);
+    std::printf("Total time : %lld ms\n", totalMs);
     std::printf("Total nodes: %llu\n", (unsigned long long)totalNodes);
-    std::printf("Nodes/second: %llu\n", (unsigned long long)(totalNodes * 1000ULL / (U64)totalMs));
+    std::printf("Nodes/second: %llu\n", (unsigned long long)(totalNodes * 1000ULL / static_cast<U64>(totalMs)));
     std::fflush(stdout);
 }
 

@@ -8,8 +8,18 @@
 
 namespace Veltrix {
 
-U64 ZobristPiece[PIECE_NB][64];
+// ZobristPiece is indexed with the Piece enum, which deliberately contains
+// the NO_PIECE sentinel (= 12, == PIECE_NB). All call sites use real pieces
+// (0..11) and put_piece()/remove_piece() explicitly guard on NO_PIECE, so
+// rows 12..15 are never *intended* to be touched. They are nonetheless kept
+// zero-filled on purpose:
+//   * an accidental sentinel lookup becomes a defined hash NO-OP (xor 0)
+//     instead of undefined behaviour via an out-of-bounds read, and
+//   * the compiler can therefore prove every access in-bounds instead of
+//     warning about it (-Warray-bounds with the sentinel in the enum range).
+U64 ZobristPiece[16][64];
 U64 ZobristSide;
+static_assert(NO_PIECE < 16, "ZobristPiece must cover the NO_PIECE sentinel");
 U64 ZobristCastling[16];
 U64 ZobristEp[8];
 int CastlingMask[64];

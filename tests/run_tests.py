@@ -245,8 +245,10 @@ def main():
         ("scholar-style", "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 1",
          "h5f7", 1),
         ("back-rank", "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1", "a1a8", 1),
+        # either ladder rook mates in two (Rb7/Ra8# or Ra7/Rb8#) -
+        # alternatives listed space-separated, same convention as tactics.epd
         ("mate in 2 (rook ladder, 1.Rb7! Kg8 2.Ra8#)",
-         "7k/8/8/8/8/8/1R6/R5K1 w - - 0 1", "b2b7", 2),
+         "7k/8/8/8/8/8/1R6/R5K1 w - - 0 1", "b2b7 a1a7", 2),
     ]
     for name, fen, expect_move, mate_in in mate_tests:
         e.cmd("ucinewgame")
@@ -255,7 +257,7 @@ def main():
         bm = [l.split()[1] for l in lines if l.startswith("bestmove")][0]
         mate_seen = any(f"score mate {mate_in}" in l for l in lines if l.startswith("info"))
         if expect_move:
-            check(f"{name}: bestmove == {expect_move}", bm == expect_move, bm)
+            check(f"{name}: bestmove in {expect_move}", bm in expect_move.split(), bm)
         check(f"{name}: announces mate in {mate_in}", mate_seen,
               "\n".join(l for l in lines if l.startswith("info"))[-200:])
 
