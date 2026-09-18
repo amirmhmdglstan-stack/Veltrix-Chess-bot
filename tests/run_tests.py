@@ -124,8 +124,9 @@ def main():
     flat = "\n".join(lines)
     check("id name Veltrix 1.0", "id name Veltrix 1.0" in flat, flat)
     check("uciok", "uciok" in flat)
-    for opt in ["Hash", "Threads", "MultiPV", "Move Overhead", "OwnBook",
-                "UCI_LimitStrength", "UCI_Elo"]:
+    for opt in ["Hash", "Threads", "MultiPV", "Move Overhead", "UseBook",
+                "UCI_LimitStrength", "UCI_Elo", "Ponder", "BookFile",
+                "SyzygyPath"]:
         check(f"option advertised: {opt}", f"option name {opt}" in flat)
     check("readyok", "readyok" in "\n".join(e.cmd("isready", wait="readyok")))
 
@@ -216,8 +217,11 @@ def main():
     out = e.read_until("moves:", timeout=5)
     check("startpos has 20 moves", len(out[0].split()) - 1 == 20, str(out[:2]))
 
-    # ------------------------------------------------------------ search smoke
-    print("== search smoke ==")
+    # search tests run with the opening book disabled (a "bestmove" arriving
+    # instantly from the book without info lines would fail these assertions);
+    # the book itself gets a dedicated test further down.
+    print("== search smoke (book disabled) ==")
+    e.cmd("setoption name UseBook value false")
     e.cmd("ucinewgame")
     e.cmd("position startpos")
     lines = e.cmd("go depth 10", wait="bestmove", timeout=20)
@@ -322,6 +326,52 @@ def main():
     lines = e.cmd("go depth 6", wait="bestmove", timeout=20)
     check("limited strength returns a bestmove", any(l.startswith("bestmove") for l in lines))
     e.cmd("setoption name UCI_LimitStrength value false")
+
+    # ------------------------------------------------------------ opening book
+    print("== opening book ==")
+    import os as _os
+    book = _os.path.join(REPO, "books", "veltrix.bin")
+    if _os.path.isfile(book):
+        e.cmd(f"setoption name BookFile value {book}")
+        e.cmd("setoption name UseBook value true")
+        e.cmd("ucinewgame")
+        e.cmd("position startpos")
+        lines = e.cmd("go depth 8", wait="bestmove", timeout=10)
+        bm = [l.split()[1] for l in lines if l.startswith("bestmove")][0]
+        info = "\n".join(lines)
+        check("book move used at startpos", "book move" in info and
+              bm in ("e2e4", "d2d4", "g1f3"), bm + " / " + info[-160:])
+        e.cmd("setoption name UseBook value false")
+    else:
+        check("book file present (books/veltrix.bin)", False)
+
+    # ------------------------------------------------------------ tactical suite
+    print("== tactical regression suite (depth 12) ==")
+    suite = _os.path.join(ROOT, "tactics.epd")
+    if _os.path.isfile(suite):
+        import re as _re
+        items = []
+        for line in open(suite):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            mbm = _re.search(r"\bbm\s+([^;]+);", line)
+            if not mbm:
+                continue
+            fields = line.split("bm")[0].strip().split()
+            fen6 = " ".join(fields[:4] + (fields[4:6] if len(fields) >= 6
+                            and fields[4].lstrip("-").isdigit() else ["0", "1"]))
+            items.append((fen6, mbm.group(1).split()))
+        ok = 0
+        for fen6, bms in items:
+            e.cmd("ucinewgame")
+            e.cmd("position fen " + fen6)
+            lines = e.cmd("go depth 12", wait="bestmove", timeout=30)
+            bm = [l.split()[1] for l in lines if l.startswith("bestmove")][0]
+            ok += bm in bms
+        check(f"tactical suite solved ({ok}/{len(items)})", ok == len(items))
+    else:
+        check("tactical suite present (tests/tactics.epd)", False)
 
     # ------------------------------------------------------------ misc commands
     print("== misc ==")

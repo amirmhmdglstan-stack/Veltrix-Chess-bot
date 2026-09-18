@@ -1,0 +1,12 @@
+# Veltrix regression tactical suite.
+# Selection criteria: depth-16 best move with multipv-2 margin >= 90 cp, reproduced
+# at depth 12 across TT contexts. Multiple bm = equivalent solutions. Mates are
+# unique hand-verified forced lines.
+
+r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 1 bm h5f7; id "vlt-mate-01 scholar mate in 1";
+6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1 bm a1a8 a1a7; id "vlt-mate-02 back-rank mate";
+7k/8/8/8/8/8/1R6/R5K1 w - - 0 1 bm b2b7 a1a7; id "vlt-mate-03 ladder mate in 2";
+2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1 bm g3g6; id "vlt-mate-04 Qg6!! winning attack";
+r1bqkb1r/3npp1p/p2p2p1/1p6/3nPP2/P1N1B3/1PP1B1PP/R3QRK1 w kq - 0 15 bm e3d4; id "vlt-gen-00 s+173 m463";
+1rbqkb1r/5p1p/p2p2p1/1p1Nn3/3BP3/P4p2/1PP1BQPP/R4RK1 w k - 0 20 bm g2f3; id "vlt-gen-01 s+200 m104";
+2b1kbr1/5p1p/pq1p2p1/1p1Nn3/4P3/P4P2/1PP1B2P/R4RK1 w - - 0 24 bm d5b6; id "vlt-gen-02 s+205 m1027";

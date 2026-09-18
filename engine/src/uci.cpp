@@ -10,6 +10,11 @@
 #include "tt.h"
 
 #include <algorithm>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <unistd.h>
+#endif
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -29,9 +34,64 @@ Position& gPos() {
     return *p;
 }
 Book gBook;
-bool gUseBook = false;
+bool gUseBook = true;   // UseBook default: enabled (auto-detects a nearby book)
 std::string gBookPath;
 U64 gBookRng = 0x243F6A8885A308D3ULL;
+
+void info_string(const std::string& s);   // defined below
+
+// --- engine location detection (for zero-config book/network discovery) ---
+static std::string exe_dir() {
+#ifdef _WIN32
+    char buf[4096];
+    DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return ".";
+    std::string s(buf, buf + n);
+    size_t p = s.find_last_of("\\/");
+    return (p == std::string::npos) ? std::string(".") : s.substr(0, p);
+#else
+    char buf[4096];
+    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return ".";
+    buf[n] = '\0';
+    std::string s(buf);
+    size_t p = s.find_last_of('/');
+    return (p == std::string::npos) ? std::string(".") : s.substr(0, p);
+#endif
+}
+
+static bool joinable_file(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f) { std::fclose(f); return true; }
+    return false;
+}
+
+// Probe a Polyglot book next to the executable / in ../books etc.
+static void auto_open_book() {
+    if (!gBookPath.empty() || gBook.is_open()) return;
+    static const char* cand[] = {
+        "/veltrix.bin",          // next to the exe
+        "/books/veltrix.bin",    // exe in repo root
+        "/../books/veltrix.bin", // exe in engine/ or bin/
+        "/../../books/veltrix.bin"
+    };
+    const std::string d = exe_dir();
+    for (const char* c : cand) {
+        std::string p = d + c;
+        if (joinable_file(p) && gBook.open(p)) {
+            gBookPath = p;
+            info_string("book auto-loaded from " + p + " (" +
+                        std::to_string(gBook.size()) + " entries)");
+            return;
+        }
+    }
+    // fall back to CWD-relative once
+    if (joinable_file("books/veltrix.bin") && gBook.open("books/veltrix.bin")) {
+        gBookPath = "books/veltrix.bin";
+        info_string("book auto-loaded from books/veltrix.bin (" +
+                    std::to_string(gBook.size()) + " entries)");
+    }
+}
 
 std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n");
@@ -64,7 +124,9 @@ void print_options() {
     std::printf("option name MultiPV type spin default 1 min 1 max 128\n");
     std::printf("option name Ponder type check default false\n");
     std::printf("option name Move Overhead type spin default 30 min 0 max 1000\n");
-    std::printf("option name OwnBook type check default false\n");
+    // Both spellings are accepted: spec-driven `UseBook` and the Cute Chess
+    // convention `OwnBook`.
+    std::printf("option name UseBook type check default true\n");
     std::printf("option name BookFile type string default <empty>\n");
     std::printf("option name SyzygyPath type string default <empty>\n");
     std::printf("option name UCI_LimitStrength type check default false\n");
@@ -72,6 +134,7 @@ void print_options() {
 }
 
 void on_uci() {
+    auto_open_book();
     std::printf("id name Veltrix 1.0\n");
     std::printf("id author Veltrix Project\n");
     print_options();
@@ -367,6 +430,10 @@ void loop() {
             // unknown commands are ignored (UCI tolerance)
         }
     }
+    // stdin closed (pipe ended / GUI went away without sending "quit"):
+    // shut down just as cleanly - an abandoned async search thread racing
+    // process teardown must not crash.
+    Search::stop_and_join();
 }
 
 } // namespace UCI

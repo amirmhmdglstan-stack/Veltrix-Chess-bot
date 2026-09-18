@@ -359,6 +359,8 @@ Value evaluate(const Position& pos) {
     return evaluate_impl<false>(pos, nullptr);
 }
 
+/// Human-readable breakdown -> now routed over UCI ('debug trace') instead of
+/// raw prints (previous behaviour collided with the protocol channel).
 std::string trace(const Position& pos) {
     init_danger_table();
     std::ostringstream os;
