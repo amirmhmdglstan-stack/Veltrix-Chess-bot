@@ -24,7 +24,7 @@ cd /d "%~dp0engine" 2>nul
 if errorlevel 1 (
     echo.
     echo ERROR: cannot find the engine\ folder.
-    echo This script (%~nx0) must live in the project root, next to the
+    echo This script ^(%~nx0^) must live in the project root, next to the
     echo engine\ gui\ tools\ folders. Do not move it or the sources.
     echo.
     exit /b 1
