@@ -34,8 +34,8 @@ License: **GPL-3.0-or-later** (see `LICENSE`). Third-party material:
    > `pacman -S mingw-w64-ucrt-x86_64-gcc`, or grab "Build Tools for Visual
    > Studio" and run `build.bat` from an *x64 Native Tools Command Prompt*.
 
-2. **Play** — with any Python 3.9+ (tkinter is included on Windows python.org
-   installs):
+2. **Play** — double-click **`run-Veltrix.bat`** (opens the GUI like a normal
+   app, no command prompt), or from a terminal:
 
    ```bat
    python gui\veltrix_gui.py
