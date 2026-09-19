@@ -1,0 +1,12 @@
+# build artifacts
+engine/build/
+engine/veltrix
+engine/veltrix.exe
+bin/veltrix
+bin/veltrix.exe
+veltrix.exe
+__pycache__/
+*.pyc
+*.o
+*.obj
+*.pgn.saved
