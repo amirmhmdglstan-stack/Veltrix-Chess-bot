@@ -1,0 +1,12 @@
+# Diverse middle/endgame positions used by tools/benchmark.py (depth 13 default).
+# Collected from a real game: provides heavy-middlegame, tactical and endgame mix.
+r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1
+r3k2r/pppq1ppp/2n2n2/2bpp3/8/2N1PNP1/PPP2PBP/R1BQ1RK1 w kq - 0 1
+2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1
+r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 4 4
+8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1
+8/pp3k2/4p3/2p5/2P5/PP6/4K3/8 w - - 0 1
+r1b2rk1/pp1p1pbp/2n1pnp1/8/3NP3/2N1BP2/PPP3PP/R3KB1R w KQ - 0 9
+2r2rk1/1p1b1ppp/pqnpp3/4n3/2P1P3/1PN2N2/PB1Q1PPP/3R1RK1 w - - 0 1
+3r2k1/pp3ppp/2n1b3/8/3P4/P1P1PN2/1P3PPP/R3K2R w KQ - 0 1
+6k1/5ppp/4r3/8/8/1R2P3/5PPP/3R2K1 w - - 0 1

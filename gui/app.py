@@ -1,0 +1,901 @@
+"""
+app.py - Veltrix 1.0 chess GUI application (tkinter).
+
+The GUI owns game flow, clocks, rendering and UCI plumbing only. All chess
+rules come from chesslib.py and all calculation comes from the external
+engine process - the GUI never evaluates or searches positions itself.
+"""
+from __future__ import annotations
+
+import os
+import random
+import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from chesslib import Board, Move, STARTPOS_FEN, game_pgn, sq_name, parse_sq   # noqa: E402
+import config_store                                                          # noqa: E402
+from config_store import Config, PRESET_TIME_CONTROLS                        # noqa: E402
+from engine_client import UCIClient, find_engine                             # noqa: E402
+from dialogs import PromotionDialog, TimeControlDialog, ColorsDialog, \
+    EngineSettingsDialog                                                    # noqa: E402
+from board_widget import BoardCanvas, UNICODE_PIECES                         # noqa: E402
+from theme import THEMES                                                     # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VERSION = "Veltrix 1.0"
+
+
+def fmt_clock(sec: float) -> str:
+    sec = max(0.0, sec)
+    m = int(sec // 60)
+    s = sec - m * 60
+    if m >= 1:
+        return f"{m}:{s:04.1f}" if s < 10 else f"{m}:{s:02.0f}"
+    return f"{s:.1f}"
+
+
+class VeltrixApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.cfg = Config.load()
+        root.title(VERSION + " - chess gui")
+        try:
+            root.geometry(self.cfg.window_geometry)
+        except tk.TclError:
+            pass
+
+        # ---------------- model ----------------
+        self.initial_fen = STARTPOS_FEN
+        self.board = Board()            # live board (at live play length)
+        self.moves: list[Move] = []     # moves from initial position
+        self.sans: list[str] = []
+        self.view = 0                   # how many moves are currently displayed
+        self.result = None              # (result, reason) or None
+        self.mode = "human_vs_engine"   # or "engine_vs_engine" / "human_vs_human"
+        self.human_color = "w"
+        self.engine_thinking = False
+        self.analyzing = False
+        self.clocks = {"w": 600.0, "b": 600.0}
+        self.incs = {"w": 0.0, "b": 0.0}
+        self.clock_active = False
+        self.tc_kind = "preset"
+        self.tc_name = "10 min rapid"
+        self._tick_job = None
+        self.game_started_at = None
+
+        # ---------------- engine ----------------
+        self.engine: UCIClient | None = None
+        self.engine2: UCIClient | None = None
+        self.engine_path = self.cfg.engine_path or find_engine(HERE) or ""
+        self._connect_engine()
+
+        # ---------------- UI ----------------
+        self._build_menu()
+        self._build_layout()
+        self.apply_cfg_visual()
+        self.new_game(keep_setup=True)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._tick()
+
+    # ============================================================ engine
+    def _connect_engine(self):
+        if self.engine:
+            self.engine.quit()
+        self.engine = UCIClient(self.engine_path) if self.engine_path else None
+        if self.engine and self.engine.start():
+            self._apply_engine_options(self.engine)
+        self.engine_thinking = False
+
+    def _apply_engine_options(self, client: UCIClient):
+        if not client:
+            return
+        client.set_option("Hash", self.cfg.hash_mb)
+        threads = self.cfg.threads
+        if threads <= 0:  # zero-config: auto-detect (capped so the GUI stays snappy)
+            threads = max(1, min(4, (os.cpu_count() or 2)))
+        client.set_option("Threads", threads)
+        client.set_option("MultiPV", self.cfg.multipv if self.cfg.show_engine_lines else 1)
+        if self.cfg.limit_strength:
+            client.set_option("UCI_LimitStrength", "true")
+            client.set_option("UCI_Elo", self.cfg.engine_elo)
+        else:
+            client.set_option("UCI_LimitStrength", "false")
+
+    def engine_color(self):
+        if self.mode == "engine_vs_engine":
+            return None
+        return "b" if self.human_color == "w" else "w"
+
+    def side_is_engine(self, color):
+        if self.mode == "engine_vs_engine":
+            return True
+        if self.mode == "human_vs_engine":
+            return color == self.engine_color()
+        return False
+
+    # ============================================================ UI build
+    def _build_menu(self):
+        m = tk.Menu(self.root)
+        g = tk.Menu(m, tearoff=0)
+        g.add_command(label="New game vs engine…", accelerator="Ctrl+N",
+                      command=self.dialog_new_game)
+        g.add_command(label="Engine vs Engine", command=self.start_eve)
+        g.add_command(label="Stop Engine vs Engine", command=self.stop_eve)
+        g.add_command(label="Human vs Human", command=self.start_hvh)
+        g.add_separator()
+        self.flip_var = tk.BooleanVar(value=self.cfg.flip_board)
+        g.add_checkbutton(label="Flip board", variable=self.flip_var,
+                          command=self.toggle_flip)
+        g.add_separator()
+        g.add_command(label="Quit", command=self.on_close)
+        m.add_cascade(label="Game", menu=g)
+
+        p = tk.Menu(m, tearoff=0)
+        p.add_command(label="Copy FEN", command=self.copy_fen)
+        p.add_command(label="Paste FEN…", command=self.paste_fen)
+        p.add_command(label="Set up start position", command=lambda: self.set_initial(STARTPOS_FEN))
+        m.add_cascade(label="Position", menu=p)
+
+        pgn = tk.Menu(m, tearoff=0)
+        pgn.add_command(label="Save game as PGN…", command=self.save_pgn)
+        pgn.add_command(label="Load game from PGN…", command=self.load_pgn)
+        m.add_cascade(label="PGN", menu=pgn)
+
+        e = tk.Menu(m, tearoff=0)
+        e.add_command(label="Engine path…", command=self.pick_engine)
+        e.add_command(label="Engine options…", command=self.dialog_engine_options)
+        e.add_command(label="Analyze this position (toggle)",
+                      command=self.toggle_analysis)
+        m.add_cascade(label="Engine", menu=e)
+
+        v = tk.Menu(m, tearoff=0)
+        v.add_command(label="Colors & theme…", command=self.dialog_colors)
+        v.add_command(label="Board size…", command=self.dialog_size)
+        self.coords_var = tk.BooleanVar(value=self.cfg.show_coords)
+        v.add_checkbutton(label="Coordinates", variable=self.coords_var,
+                          command=self.toggle_coords)
+        self.hl_last_var = tk.BooleanVar(value=self.cfg.highlight_last_move)
+        v.add_checkbutton(label="Highlight last move", variable=self.hl_last_var,
+                          command=self.apply_hl_options)
+        self.hl_check_var = tk.BooleanVar(value=self.cfg.highlight_check)
+        v.add_checkbutton(label="Highlight check", variable=self.hl_check_var,
+                          command=self.apply_hl_options)
+        self.hl_targets_var = tk.BooleanVar(value=self.cfg.highlight_legal_targets)
+        v.add_checkbutton(label="Highlight legal targets", variable=self.hl_targets_var,
+                          command=self.apply_hl_options)
+        self.elines_var = tk.BooleanVar(value=self.cfg.show_engine_lines)
+        v.add_checkbutton(label="Show engine lines", variable=self.elines_var,
+                          command=self.apply_engine_lines_toggle)
+        m.add_cascade(label="View", menu=v)
+
+        h = tk.Menu(m, tearoff=0)
+        h.add_command(label="Tutorial", command=self.open_tutorial)
+        h.add_command(label="About", command=lambda: messagebox.showinfo(
+            "About", VERSION + "\nUCI chess engine + GUI\nsee docs/TUTORIAL.md"))
+        m.add_cascade(label="Help", menu=h)
+        self.root.config(menu=m)
+
+    def _build_layout(self):
+        main = ttk.Frame(self.root)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(main, padding=6)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        self.lbl_top_player = ttk.Label(left, text="Black", font=("TkDefaultFont", 11, "bold"))
+        self.lbl_top_player.pack(anchor="w")
+        self.lbl_top_clock = ttk.Label(left, text="10:00", font=("TkDefaultFont", 16))
+        self.lbl_top_clock.pack(anchor="w", pady=(0, 4))
+        self.lbl_top_captured = tk.Label(left, text="", font=("Segoe UI Symbol", 13),
+                                         justify=tk.LEFT, anchor="w", wraplength=140)
+        self.lbl_top_captured.pack(anchor="w", pady=(0, 10))
+        self.lbl_bottom_captured = tk.Label(left, text="", font=("Segoe UI Symbol", 13),
+                                            justify=tk.LEFT, anchor="w", wraplength=140)
+        self.lbl_bottom_captured.pack(anchor="w", side=tk.BOTTOM, pady=(10, 0))
+        self.lbl_bottom_player = ttk.Label(left, text="White", font=("TkDefaultFont", 11, "bold"))
+        self.lbl_bottom_player.pack(anchor="w", side=tk.BOTTOM)
+        self.lbl_bottom_clock = ttk.Label(left, text="10:00", font=("TkDefaultFont", 16))
+        self.lbl_bottom_clock.pack(anchor="w", side=tk.BOTTOM, pady=(4, 0))
+
+        center = ttk.Frame(main, padding=4)
+        center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas = BoardCanvas(center, size=self.cfg.board_size)
+        self.canvas.pack(anchor="center", expand=True)
+        self.canvas.on_square_click = self.on_square_click
+        self.canvas.on_right_click = self.canvas.deselect
+
+        btns = ttk.Frame(center, padding=2)
+        btns.pack(fill=tk.X)
+        for text, cmd, in (("◀◀", lambda: self.navigate(0)), ("◀", lambda: self.navigate(self.view - 1)),
+                           ("▶", lambda: self.navigate(self.view + 1)), ("▶▶", lambda: self.navigate(len(self.moves))),
+                           ("Flip", self.toggle_flip_menu)):
+            ttk.Button(btns, text=text, width=5, command=cmd).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Resign", width=7, command=self.resign).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btns, text="New", width=6, command=self.dialog_new_game).pack(side=tk.RIGHT, padx=2)
+
+        right = ttk.Frame(main, padding=6)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        ttk.Label(right, text="Moves", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        mv_frame = ttk.Frame(right)
+        mv_frame.pack(fill=tk.BOTH, expand=True)
+        self.moves_list = tk.Text(mv_frame, width=34, height=16, state="disabled",
+                                  wrap="word", cursor="arrow")
+        sb = ttk.Scrollbar(mv_frame, command=self.moves_list.yview)
+        self.moves_list.configure(yscrollcommand=sb.set)
+        self.moves_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.moves_list.bind("<Button-1>", self.on_moves_click)
+
+        ttk.Label(right, text="Engine", font=("TkDefaultFont", 10, "bold")).pack(
+            anchor="w", pady=(6, 0))
+        self.engine_box = tk.Text(right, width=34, height=7, state="disabled",
+                                  wrap="word", font=("TkFixedFont", 9))
+        self.engine_box.pack(fill=tk.X)
+        self.status_var = tk.StringVar(value="ready")
+        ttk.Label(right, textvariable=self.status_var, wraplength=300).pack(
+            anchor="w", pady=(6, 0))
+        self.tc_lbl = ttk.Label(right, text="")
+        self.tc_lbl.pack(anchor="w")
+
+    # ============================================================ visuals
+    def apply_cfg_visual(self):
+        light, dark = THEMES.get(self.cfg.theme, (self.cfg.light_sq, self.cfg.dark_sq))
+        if self.cfg.light_sq and self.cfg.dark_sq:
+            light, dark = self.cfg.light_sq, self.cfg.dark_sq
+        self.canvas.light, self.canvas.dark = light, dark
+        self.canvas.show_coords = self.cfg.show_coords
+        self.canvas.flipped = self.cfg.flip_board
+        self.canvas.animation_ms = self.cfg.animation_ms
+        self.canvas.set_size(self.cfg.board_size)
+        self.apply_hl_options()
+        self.canvas.redraw()
+
+    def apply_hl_options(self):
+        self.cfg.highlight_last_move = self.hl_last_var.get()
+        self.cfg.highlight_check = self.hl_check_var.get()
+        self.cfg.highlight_legal_targets = self.hl_targets_var.get()
+        self.canvas.highlight_last = self.cfg.highlight_last_move
+        self.canvas.highlight_check = self.cfg.highlight_check
+        self.canvas.highlight_targets = self.cfg.highlight_legal_targets
+        self.canvas.redraw()
+
+    def apply_engine_lines_toggle(self):
+        self.cfg.show_engine_lines = self.elines_var.get()
+        if self.engine:
+            self._apply_engine_options(self.engine)
+        self.engine_box_update()
+
+    # ============================================================ game setup
+    def current_tc_seconds(self):
+        """((w_base, w_inc), (b_base, b_inc)) in seconds."""
+        name, minutes, inc = self.cfg.time_control
+        if minutes == "custom":
+            return ((self.cfg.custom_minutes_white * 60, self.cfg.custom_inc_white),
+                    (self.cfg.custom_minutes_black * 60, self.cfg.custom_inc_black))
+        if minutes is None:  # unlimited
+            return ((None, 0), (None, 0))
+        return ((minutes * 60, inc), (minutes * 60, inc))
+
+    def new_game(self, side="w", keep_setup=False):
+        if not keep_setup:
+            self.initial_fen = self.current_fen_base()
+        # reset state
+        self.board = Board(self.initial_fen)
+        self.moves, self.sans = [], []
+        self.view = 0
+        self.result = None
+        self.human_color = side
+        (wb, wi), (bb, bi) = self.current_tc_seconds()
+        self.clocks = {"w": wb if wb is not None else float("inf"),
+                       "b": bb if bb is not None else float("inf")}
+        self.incs = {"w": wi or 0, "b": bi or 0}
+        self.clock_active = True
+        if self.mode != "engine_vs_engine":
+            self.mode = "human_vs_engine"
+        if self.engine:
+            self.engine.new_game()
+        if self.engine2:
+            self.engine2.new_game()
+        self._sync_board_widget()
+        self.move_list_update()
+        self.status(f"new game - you are {'White' if side == 'w' else 'Black'}")
+        self.maybe_engine_move()
+
+    def current_fen_base(self):
+        return self.initial_fen
+
+    def set_initial(self, fen):
+        self.initial_fen = fen
+        self.new_game(side=self.human_color, keep_setup=True)
+
+    def dialog_new_game(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("New game")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        side_var = tk.StringVar(value="w")
+        ttk.Label(dlg, text="Play as:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        for i, (t, v) in enumerate((("White", "w"), ("Black", "b"), ("Random", "r"))):
+            ttk.Radiobutton(dlg, text=t, value=v, variable=side_var).grid(
+                row=0, column=1 + i, padx=6)
+        ttk.Button(dlg, text="Start", command=lambda: (dlg.destroy(), self._start_chosen(side_var.get()))).grid(
+            row=1, column=0, columnspan=4, pady=8)
+        dlg.wait_window()
+
+    def _start_chosen(self, side):
+        if side == "r":
+            side = random.choice("wb")
+        self.human_color = side
+        self.mode = "human_vs_engine"
+        self.new_game(side=side)
+
+    def start_hvh(self):
+        self.mode = "human_vs_human"
+        self.new_game(side=self.human_color)
+        self.status("human vs human")
+
+    def start_eve(self):
+        if not self.engine_path:
+            self.pick_engine()
+            if not self.engine_path:
+                return
+        if not self.engine2:
+            self.engine2 = UCIClient(self.engine_path)
+            self.engine2.start()
+            self._apply_engine_options(self.engine2)
+        self.mode = "engine_vs_engine"
+        self.new_game(side=self.human_color)
+        self.status("engine vs engine - use Game > Stop to end")
+
+    def stop_eve(self):
+        if self.mode == "engine_vs_engine":
+            self.mode = "human_vs_engine"
+        if self.engine:
+            self.engine.stop()
+        if self.engine2:
+            self.engine2.stop()
+        self.engine_thinking = False
+        self.status("engine vs engine stopped")
+
+    # ============================================================ play flow
+    def live_board(self) -> Board:
+        return self.board
+
+    def view_board(self) -> Board:
+        if self.view == len(self.moves):
+            return self.board
+        nb = Board(self.initial_fen)
+        for m in self.moves[:self.view]:
+            nb.push(m)
+        return nb
+
+    def _sync_board_widget(self, animate=None):
+        vb = self.view_board()
+        last = None
+        if self.moves and self.view > 0:
+            m = self.moves[self.view - 1]
+            last = (m.frm, m.to)
+        check_sq = None
+        if vb.in_check(vb.stm):
+            check_sq = vb.king_sq(vb.stm)
+        self.canvas.set_position(vb, last_move=last, check_sq=check_sq,
+                                 animate_move=animate)
+        self._update_captured()
+        self.move_list_update()
+        self._update_clock_labels()
+
+    def _update_captured(self):
+        start_counts = {}
+        for ch in "PNBRQpnbrq":
+            start_counts[ch] = 8 if ch.upper() == "P" else 2 if ch.upper() in "NBR" else 1
+        cur = start_counts.copy()
+        for p in self.board.board:
+            if p != ".":
+                if p in cur:
+                    cur[p] -= 1
+                else:  # e.g. puzzle positions with extra pieces / kings
+                    cur[p] = cur.get(p, 1) - 1
+        lost_w = "".join(UNICODE_PIECES[c] * n for c, n in cur.items() if c.isupper() and n > 0)
+        lost_b = "".join(UNICODE_PIECES[c] * n for c, n in cur.items() if c.islower() and n > 0)
+        from chesslib import PIECE_VALS
+        mat = sum(PIECE_VALS[p.upper()] * (1 if p.isupper() else -1) for p in self.board.board if p != ".")
+        sign = f"+{mat//100}.{abs(mat)%100:02d}" if mat > 0 else (f"-{-mat//100}.{abs(mat)%100:02d}" if mat < 0 else "")
+        white_is_bottom = not self.canvas.flipped
+        bottom = lost_b + ("  " + sign if mat > 0 else "")   # white sees black's lost pieces
+        top = lost_w + ("  " + sign if mat < 0 else "")
+        self.lbl_bottom_captured.configure(text=bottom if white_is_bottom else top)
+        self.lbl_top_captured.configure(text=top if white_is_bottom else bottom)
+
+    def on_square_click(self, sq):
+        if self.result or self.mode == "engine_vs_engine":
+            return
+        vb = self.view_board()
+        if self.view != len(self.moves):
+            return
+        if self.mode == "human_vs_engine" and vb.stm != self.human_color:
+            return
+        # selecting
+        if self.canvas.selected is None:
+            piece = vb.board[sq]
+            if piece != "." and ("w" if piece.isupper() else "b") == vb.stm:
+                targets = [m.to for m in vb.legal_moves() if m.frm == sq]
+                self.canvas.select(sq, targets)
+            return
+        frm = self.canvas.selected
+        if frm == sq:
+            self.canvas.deselect()
+            return
+        cand = [m for m in vb.legal_moves() if m.frm == frm and m.to == sq]
+        if not cand:
+            piece = vb.board[sq]
+            if piece != "." and ("w" if piece.isupper() else "b") == vb.stm:
+                targets = [m.to for m in vb.legal_moves() if m.frm == sq]
+                self.canvas.select(sq, targets)
+            else:
+                self.canvas.deselect()
+            return
+        m = cand[0]
+        if len(cand) > 1:  # promotion choices
+            promo = PromotionDialog(self.canvas, vb.stm == "w").show()
+            if not promo:
+                self.canvas.deselect()
+                return
+            m = next(mm for mm in cand if mm.promo == promo)
+        self.canvas.deselect()
+        self.play_move(m, mover="human")
+
+    def play_move(self, m: Move, mover="human"):
+        moved_color = self.board.stm
+        san = self.board.san(m)
+        self.board.push(m)
+        self.moves.append(m)
+        self.sans.append(san)
+        self.view = len(self.moves)
+        # apply increment to the side that just moved
+        if self.clocks[moved_color] != float("inf"):
+            self.clocks[moved_color] += self.incs[moved_color]
+        self._sync_board_widget(animate=m)
+        self.check_game_end()
+        self.maybe_engine_move()
+
+    def maybe_engine_move(self):
+        if self.result or self.analyzing:
+            return
+        stm = self.board.stm
+        if not self.side_is_engine(stm):
+            return
+        client = self.engine if (self.mode == "human_vs_engine" or stm == "w") else self.engine2
+        if client is None:
+            client = self.engine
+        if client is None or not client.alive:
+            return
+        client.set_position("startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen,
+                            [m.uci() for m in self.moves])
+        if "inf" in str(self.clocks[stm]) or self.clocks[stm] == float("inf"):
+            client.go(movetime=self.cfg.move_time_ms)
+        else:
+            client.go(wtime=self.clocks["w"] * 1000, btime=self.clocks["b"] * 1000,
+                      winc=self.incs["w"] * 1000, binc=self.incs["b"] * 1000)
+        self.engine_thinking = True
+        self.status(f"engine thinking as {'white' if stm == 'w' else 'black'}…")
+
+    def on_engine_bestmove(self, client, data):
+        # ignore stale bestmoves when not expecting one from this client
+        stm = self.board.stm
+        expected = self.engine if (self.mode == "human_vs_engine" or stm == "w") else self.engine2
+        if client is not expected and self.mode == "engine_vs_engine":
+            return
+        self.engine_thinking = False
+        if self.result or self.analyzing:
+            return
+        bm = data["move"]
+        if bm == "0000":
+            self.check_game_end(force=True)
+            return
+        try:
+            m = self.board.parse_uci(bm)
+        except ValueError:
+            self.status(f"engine produced illegal move {bm} - game aborted")
+            self.result = ("1/2-1/2", "engine error")
+            self.check_game_end(force=True)
+            return
+        self.play_move(m, mover="engine")
+
+    def check_game_end(self, force=False):
+        out = self.board.outcome()
+        if out:
+            self.result = out
+            self.status(f"game over: {out[0]} - {out[1]}")
+            self.clock_active = False
+            if self.mode == "engine_vs_engine":
+                self.root.after(1200, self._eve_next)
+        elif force:
+            self.status("game stopped")
+
+    def _eve_next(self):
+        if self.mode == "engine_vs_engine":
+            self.new_game(side=self.human_color)
+
+    def resign(self):
+        if self.result or self.mode == "engine_vs_engine":
+            return
+        if self.mode == "human_vs_engine" or self.mode == "human_vs_human":
+            winner = "0-1" if self.board.stm == "w" else "1-0"
+            self.result = (winner, "resignation")
+            self.status(f"game over: {winner} - resignation")
+            self.clock_active = False
+            self._sync_board_widget()
+
+    # ============================================================ clock
+    def _tick(self):
+        now = tk_current_ms()
+        prev = getattr(self, "_last_tick", now)
+        self._last_tick = now
+        dt = (now - prev) / 1000.0
+        if dt >= 10:        # suspend/resume guard
+            dt = 0
+        if self.clock_active and not self.result:
+            stm = self.board.stm
+            if self.clocks[stm] != float("inf"):
+                self.clocks[stm] -= dt
+                if self.clocks[stm] <= 0:
+                    self.clocks[stm] = 0
+                    winner = "0-1" if stm == "w" else "1-0"
+                    self.result = (winner, "time out")
+                    self.status(f"game over: {winner} - flag fall")
+                    self.clock_active = False
+                    self._sync_board_widget()
+        self._update_clock_labels()
+        self._tick_job = self.root.after(100, self._tick)
+        self._pump_engine_events()
+
+    def _update_clock_labels(self):
+        wl = fmt_clock(self.clocks["w"]) if self.clocks["w"] != float("inf") else "∞"
+        bl = fmt_clock(self.clocks["b"]) if self.clocks["b"] != float("inf") else "∞"
+        white_bottom = not self.canvas.flipped
+        white_to_move = self.board.stm == "w"
+        # bold side to move
+        wtxt, btxt = wl, bl
+        self.lbl_bottom_clock.configure(text=wtxt if white_bottom else btxt)
+        self.lbl_top_clock.configure(text=btxt if white_bottom else wtxt)
+        wname = "White" + (" (you)" if self.mode != "engine_vs_engine" and self.human_color == "w" else " (engine)" if self.side_is_engine("w") else "")
+        bname = "Black" + (" (you)" if self.mode != "engine_vs_engine" and self.human_color == "b" else " (engine)" if self.side_is_engine("b") else "")
+        self.lbl_bottom_player.configure(text=(wname if white_bottom else bname) + (" ←" if white_to_move == white_bottom else ""))
+        self.lbl_top_player.configure(text=(bname if white_bottom else wname) + (" ←" if white_to_move != white_bottom else ""))
+
+    def _pump_engine_events(self):
+        for client in (self.engine, self.engine2):
+            if not client:
+                continue
+            for ev in client.poll():
+                if ev.kind == "bestmove":
+                    self.on_engine_bestmove(client, ev.data)
+                elif ev.kind == "info":
+                    self.on_engine_info(client, ev.data)
+                elif ev.kind == "error":
+                    self.status(str(ev.data))
+                elif ev.kind == "engine_exited":
+                    self.status("engine process exited")
+                elif ev.kind == "id":
+                    client.id_name = ev.data
+
+    _last_info_lines: dict = {}
+
+    def on_engine_info(self, client, info):
+        if "depth" not in info or not self.cfg.show_engine_lines:
+            return
+        key = info.get("multipv", 1)
+        if not hasattr(self, "_info_lines"):
+            self._info_lines = {}
+        score_txt = ""
+        if "score" in info:
+            kind, val = info["score"]
+            if kind == "cp":
+                score_txt = f"{val / 100:+.2f}"
+            else:
+                score_txt = f"M{val:+d}"
+        pv_txt = ""
+        if "pv" in info and info["pv"]:
+            nb = self.view_board().copy()
+            san_list = []
+            for u in info["pv"][:12]:
+                try:
+                    m = nb.parse_uci(u)
+                    san_list.append(nb.san(m))
+                    nb.push(m)
+                except ValueError:
+                    break
+            pv_txt = " ".join(san_list)
+        nps = info.get("nps", 0)
+        line = f"d{info['depth']:2d} {score_txt:8s} {nps / 1e6:6.2f}M  {pv_txt}"
+        self._info_lines[key] = line
+        self.engine_box_update()
+
+    def engine_box_update(self):
+        lines = getattr(self, "_info_lines", {})
+        self.engine_box.configure(state="normal")
+        self.engine_box.delete("1.0", tk.END)
+        for k in sorted(lines):
+            self.engine_box.insert(tk.END, lines[k] + "\n")
+        name = self.engine.id_name if self.engine else "no engine"
+        self.engine_box.insert(tk.END, f"— {name}\n")
+        self.engine_box.configure(state="disabled")
+        self.engine_box.see(tk.END)
+
+    # ============================================================ navigation
+    def navigate(self, idx):
+        idx = max(0, min(idx, len(self.moves)))
+        if idx == self.view:
+            return
+        nb = Board(self.initial_fen)
+        for m in self.moves[:idx]:
+            nb.push(m)
+        self.view = idx
+        vb = nb
+        last = None
+        if idx > 0:
+            m = self.moves[idx - 1]
+            last = (m.frm, m.to)
+        check_sq = vb.king_sq(vb.stm) if vb.in_check(vb.stm) else None
+        self.canvas.set_position(vb, last_move=last, check_sq=check_sq)
+        self.status("viewing history - click ▶▶ to return to live"
+                    if idx != len(self.moves) else "live position")
+
+    def on_moves_click(self, ev):
+        index = self.moves_list.index(f"@{ev.x},{ev.y}")
+        # figure out which move number was clicked: parse "3." style tags is
+        # overkill; approximate by line (we write two moves per line)
+        row = int(index.split(".")[0]) - 1
+        target = max(0, min(row * 2 + 1, len(self.moves)))
+        if target != self.view:
+            self.navigate(target)
+
+    def move_list_update(self):
+        self.moves_list.configure(state="normal")
+        self.moves_list.delete("1.0", tk.END)
+        for i, s in enumerate(self.sans):
+            if i % 2 == 0:
+                self.moves_list.insert(tk.END, f"{i // 2 + 1}. ")
+            self.moves_list.insert(tk.END, s + "  ")
+            if i % 2 == 1:
+                self.moves_list.insert(tk.END, "\n")
+        if self.result:
+            self.moves_list.insert(tk.END, "\n" + self.result[0])
+        self.moves_list.configure(state="disabled")
+        self.moves_list.see(tk.END)
+
+    # ============================================================ FEN / PGN
+    def copy_fen(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.view_board().fen())
+        self.status("FEN copied to clipboard")
+
+    def paste_fen(self):
+        fen = simpledialog.askstring("Paste FEN", "FEN:", parent=self.root)
+        if not fen:
+            return
+        try:
+            b = Board(fen.strip())
+        except ValueError as exc:
+            messagebox.showerror("Invalid FEN", str(exc))
+            return
+        self.initial_fen = b.fen()
+        self.new_game(side=self.human_color)
+        self.status("position loaded from FEN")
+
+    def save_pgn(self):
+        result = self.result[0] if self.result else "*"
+        if self.mode == "engine_vs_engine":
+            wname = bname = self.engine.id_name if self.engine else "Veltrix"
+        else:
+            wname = "Player" if self.human_color == "w" else (self.engine.id_name if self.engine else "Veltrix")
+            bname = "Player" if self.human_color == "b" else (self.engine.id_name if self.engine else "Veltrix")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pgn", filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")])
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(game_pgn(self.initial_fen, self.sans, wname, bname, result))
+        self.status(f"PGN saved: {path}")
+
+    def load_pgn(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError as exc:
+            messagebox.showerror("Load PGN", str(exc))
+            return
+        ok, msg = self._import_pgn(text)
+        if not ok:
+            messagebox.showerror("Load PGN", msg)
+        else:
+            self.status(msg)
+
+    def _import_pgn(self, text: str):
+        import re
+        fen = STARTPOS_FEN
+        m = re.search(r'\[FEN "([^"]+)"\]', text)
+        if m:
+            fen = m.group(1)
+        body = re.sub(r"\[[^\]]*\]", "", text)
+        body = re.sub(r"\{[^}]*\}", " ", body)           # comments
+        body = re.sub(r"\$\d+", " ", body)               # NAGs
+        body = re.sub(r"\([^)]*\)", " ", body)           # variations (shallow)
+        tokens = re.split(r"\s+", body)
+        b = Board(fen)
+        moves, sans = [], []
+        for tok in tokens:
+            tok = tok.strip()
+            if not tok or tok in ("1-0", "0-1", "1/2-1/2", "*"):
+                continue
+            if re.match(r"^\d+\.(\.\.)?$", tok):
+                continue
+            tok = tok.split(".", 1)[-1]
+            if not tok:
+                continue
+            found = None
+            for mv in b.legal_moves():
+                if b.san(mv) == tok:
+                    found = mv
+                    break
+            if found is None:
+                return False, f"could not parse move '{tok}'"
+            sans.append(b.san(found))
+            b.push(found)
+            moves.append(found)
+        self.initial_fen = fen
+        self.new_game(side=self.human_color)
+        for mv, s in zip(moves, sans):
+            self.board.push(mv)
+            self.moves.append(mv)
+            self.sans.append(s)
+        self.view = len(self.moves)
+        self._sync_board_widget()
+        return True, f"loaded {len(moves)} moves from PGN"
+
+    # ============================================================ settings
+    def pick_engine(self):
+        path = filedialog.askopenfilename(
+            title="Locate veltrix engine binary",
+            filetypes=[("Engine", "veltrix.exe veltrix *"), ("All files", "*.*")])
+        if path:
+            self.engine_path = path
+            self.cfg.engine_path = path
+            self._connect_engine()
+            self.status(f"engine: {path}")
+
+    def dialog_engine_options(self):
+        res = EngineSettingsDialog(self.root, self.cfg).show()
+        if not res:
+            return
+        self.cfg.limit_strength = bool(res["limit"])
+        self.cfg.engine_elo = int(res["elo"])
+        self.cfg.multipv = int(res["multipv"])
+        self.cfg.hash_mb = int(res["hash"])
+        self.cfg.threads = int(res["threads"])
+        self.cfg.move_time_ms = int(res["movetime"])
+        for c in (self.engine, self.engine2):
+            if c:
+                self._apply_engine_options(c)
+        self.status("engine options applied")
+        self.cfg.save()
+
+    def dialog_time_control(self):
+        res = TimeControlDialog(self.root, self.cfg.time_control).show()
+        if not res:
+            return
+        if res[0] == "custom":
+            _, wm, wi, bm, bi = res
+            self.cfg.custom_minutes_white, self.cfg.custom_inc_white = wm, wi
+            self.cfg.custom_minutes_black, self.cfg.custom_inc_black = bm, bi
+            self.cfg.time_control = ("custom…", "custom", "custom")
+        elif res[0] == "unlimited":
+            self.cfg.time_control = (res[1], None, None)
+        else:
+            self.cfg.time_control = (res[1], res[2], res[3])
+        self.tc_lbl.configure(text=f"time control: {self.cfg.time_control[0]}")
+        self.status(f"time control: {self.cfg.time_control[0]}")
+        self.cfg.save()
+
+    def dialog_colors(self):
+        res = ColorsDialog(self.root, self.cfg.theme, self.cfg.light_sq, self.cfg.dark_sq).show()
+        if not res:
+            return
+        self.cfg.theme, self.cfg.light_sq, self.cfg.dark_sq = res
+        self.apply_cfg_visual()
+        self.cfg.save()
+
+    def dialog_size(self):
+        v = simpledialog.askinteger("Board size", "pixels (360-1600):",
+                                    initialvalue=self.cfg.board_size,
+                                    minvalue=360, maxvalue=1600, parent=self.root)
+        if v:
+            self.cfg.board_size = v
+            self.apply_cfg_visual()
+            self.cfg.save()
+
+    def toggle_coords(self):
+        self.cfg.show_coords = self.coords_var.get()
+        self.canvas.show_coords = self.cfg.show_coords
+        self.canvas.redraw()
+        self.cfg.save()
+
+    def toggle_flip(self):
+        self.cfg.flip_board = self.flip_var.get()
+        self.canvas.flipped = self.cfg.flip_board
+        self._sync_board_widget()
+        self.cfg.save()
+
+    def toggle_flip_menu(self):
+        self.flip_var.set(not self.flip_var.get())
+        self.toggle_flip()
+
+    def toggle_analysis(self):
+        if not self.engine or not self.engine.alive:
+            return
+        self.analyzing = not self.analyzing
+        if self.analyzing:
+            vb = self.view_board()
+            mv_hist = [m.uci() for m in self.moves[:self.view]]
+            self.engine.set_position(
+                "startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen, mv_hist)
+            self.engine.go(infinite=True)
+            self.status("analysis mode on - engine thinking until toggled off")
+        else:
+            self.engine.stop()
+            self.status("analysis mode off")
+            self.maybe_engine_move()
+
+    def open_tutorial(self):
+        path = os.path.join(HERE, "..", "docs", "TUTORIAL.md")
+        if os.path.isfile(path):
+            if os.name == "nt":
+                os.startfile(path)  # noqa
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        else:
+            messagebox.showinfo("Tutorial", "docs/TUTORIAL.md was not found in the repo.")
+
+    def status(self, msg):
+        self.status_var.set(msg)
+
+    # ============================================================ shutdown
+    def on_close(self):
+        self.status("shutting down engines…")
+        try:
+            self.cfg.flip_board = self.flip_var.get()
+            self.cfg.window_geometry = self.root.geometry()
+            self.cfg.save()
+        except Exception:
+            pass
+        for c in (self.engine, self.engine2):
+            if c:
+                c.quit()
+        self.root.after(100, self.root.destroy)
+
+
+def tk_current_ms():
+    import time
+    return time.time() * 1000
+
+
+def main():
+    root = tk.Tk()
+    app = VeltrixApp(root)
+    # time-control menu entry (needs app)
+    m = root.nametowidget(root["menu"])
+    for label in ("Game",):
+        idx = m.index(label)
+        sub = m.nametowidget(m.entrycget(idx, "menu"))
+        sub.insert_command(1, label="Time control…", command=app.dialog_time_control)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
