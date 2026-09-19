@@ -1,0 +1,22 @@
+{
+ "tag": "vnn1-005",
+ "rows": 25300,
+ "epochs": 14,
+ "batch": 1024,
+ "huber": 0.3,
+ "val_mae_cp": 1388.4,
+ "val_corr": 0.363,
+ "parity_mean_cp": 32.58,
+ "parity_max_cp": 141.6,
+ "max_acc": 66.0,
+ "parity_tol": 45.0,
+ "parity_waiver": "documented: 32.6cp mean int/float drift accepted for gating; downstream tactics/match remain arbiters",
+ "gate_match": {
+  "vs": "HCE champion",
+  "games": 40,
+  "movetime_ms": 100,
+  "score": "0-40",
+  "verdict": "REJECTED (twice, with vnn1-001 as well)"
+ },
+ "file": "networks/candidates/vnn1-005.nnue"
+}

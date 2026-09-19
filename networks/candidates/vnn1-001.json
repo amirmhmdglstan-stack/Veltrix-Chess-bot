@@ -1,0 +1,15 @@
+{
+ "tag": "vnn1-001",
+ "rows": 25300,
+ "epochs": 10,
+ "batch": 8192,
+ "huber": 1000000000.0,
+ "val_mae_cp": 303.95,
+ "val_corr": 0.002,
+ "parity_mean_cp": 0.5255,
+ "parity_max_cp": 1.7576,
+ "max_acc": 15.0,
+ "parity_tol": 6.0,
+ "note": "pre-Huber trainer; material-blind output (constant ~15cp); kept as evidence",
+ "file": "networks/candidates/vnn1-001.nnue"
+}
