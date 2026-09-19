@@ -48,6 +48,10 @@ class Config:
     opponent_key: str = "model:High"    # "model:<key>" or "engine:<name>"
     stockfish_path: str = ""            # detected or manual; '' = absent
     external_engines: list = None       # registry (gui/ext_engines.py)
+    resume_game: dict = None            # saved in-progress game (PART 5)
+    animations: bool = True             # piece-move animation (PART 11)
+    sound_on: bool = False              # board sounds (PART 10; opt-in)
+    sound_volume: int = 70              # 0-100
     time_control: tuple = ("10 min rapid", 10, 0)
     # white/black can have individual base+inc when custom
     custom_minutes_white: float = 5.0

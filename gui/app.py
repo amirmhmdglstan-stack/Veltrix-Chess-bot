@@ -81,11 +81,15 @@ class VeltrixApp:
             self.cfg.opponent_key = "model:" + self.model.key
         self._connect_engine()
 
+        self.TIME_CONTROLS = PRESET_TIME_CONTROLS
         # ---------------- UI ----------------
-        self._build_menu()
-        self._build_layout()
+        self._build_menu()          # native menubar (fallback & shortcuts)
+        self._build_layout()        # the game screen (frame)
+        self._build_menu_screen()   # the main menu (frame)
+        self._build_config_screen() # the new-game configuration (frame)
         self.apply_cfg_visual()
-        self.new_game(keep_setup=True)
+        self.new_game(keep_setup=True, silent=True)
+        self.show_frame("menu")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._tick()
 
@@ -284,7 +288,8 @@ class VeltrixApp:
         self.root.config(menu=m)
 
     def _build_layout(self):
-        main = ttk.Frame(self.root)
+        self.game_frame = ttk.Frame(self.root)
+        main = ttk.Frame(self.game_frame)
         main.pack(fill=tk.BOTH, expand=True)
 
         left = ttk.Frame(main, padding=6)
@@ -313,12 +318,13 @@ class VeltrixApp:
 
         btns = ttk.Frame(center, padding=2)
         btns.pack(fill=tk.X)
-        for text, cmd, in (("◀◀", lambda: self.navigate(0)), ("◀", lambda: self.navigate(self.view - 1)),
-                           ("▶", lambda: self.navigate(self.view + 1)), ("▶▶", lambda: self.navigate(len(self.moves))),
+        for text, cmd, in (("◀◀", self.undo_all_plies), ("◀", lambda: self.undo_plies(1)),
+                           ("▶", lambda: self.redo_plies(1)), ("▶▶", self.redo_all_plies),
                            ("Flip", self.toggle_flip_menu)):
             ttk.Button(btns, text=text, width=5, command=cmd).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Resign", width=7, command=self.resign).pack(side=tk.RIGHT, padx=2)
         ttk.Button(btns, text="New", width=6, command=self.dialog_new_game).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btns, text="Menu", width=6, command=self.menu_button).pack(side=tk.RIGHT, padx=2)
 
         right = ttk.Frame(main, padding=6)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -343,6 +349,426 @@ class VeltrixApp:
             anchor="w", pady=(6, 0))
         self.tc_lbl = ttk.Label(right, text="")
         self.tc_lbl.pack(anchor="w")
+        self.lbl_model = ttk.Label(right, text="", foreground="#5a6a7a")
+        self.lbl_model.pack(anchor="w")
+
+    # ===================================================== frame navigation
+    def show_frame(self, name: str):
+        """Top-level navigation between Menu / Config / Game screens."""
+        for frame in (getattr(self, "menu_frame", None),
+                      getattr(self, "config_frame", None),
+                      getattr(self, "game_frame", None)):
+            if frame is not None:
+                frame.pack_forget()
+        if name == "menu":
+            self._refresh_menu()
+            self.menu_frame.pack(fill=tk.BOTH, expand=True)
+        elif name == "config":
+            self.config_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.game_frame.pack(fill=tk.BOTH, expand=True)
+        self._active_frame = name
+
+    def _build_menu_screen(self):
+        self.menu_frame = ttk.Frame(self.root, padding=28)
+        brand = ttk.Frame(self.menu_frame)
+        brand.pack(pady=(30, 24))
+        tk.Label(brand, text="\u265e", font=("Segoe UI Symbol", 44)).pack()
+        ttk.Label(brand, text="VELTRIX",
+                  font=("TkDefaultFont", 26, "bold")).pack()
+        ttk.Label(brand, text="Chess, honestly. Play, learn, improve.",
+                  font=("TkDefaultFont", 11)).pack(pady=(2, 0))
+        col = ttk.Frame(self.menu_frame)
+        col.pack()
+        self._menu_btns = {}
+        entries = [
+            ("continue", "Continue", self.menu_continue),
+            ("new", "New Game", lambda: self.show_frame("config")),
+            ("analyze", "Analyze", self.menu_analyze),
+            ("settings", "Settings", self.dialog_settings),
+            ("engines", "Engines", self.dialog_engines),
+            ("about", "About", self.dialog_about),
+            ("quit", "Quit", self.on_close),
+        ]
+        for i, (key, text, cmd) in enumerate(entries):
+            b = ttk.Button(col, text=text, command=cmd,
+                           width=22 if key != "continue" else 24)
+            b.pack(pady=4)
+            self._menu_btns[key] = b
+
+    def _build_config_screen(self):
+        """PART-6 game-configuration screen."""
+        f = ttk.Frame(self.root, padding=24)
+        self.config_frame = f
+        ttk.Label(f, text="New Game", font=("TkDefaultFont", 18, "bold")).pack(
+            anchor="w", pady=(10, 12))
+        grid = ttk.Frame(f)
+        grid.pack(anchor="w")
+
+        ttk.Label(grid, text="Play as:").grid(row=0, column=0, sticky="w", pady=4)
+        self.cfg_side_var = tk.StringVar(value="w")
+        sf = ttk.Frame(grid)
+        sf.grid(row=0, column=1, sticky="w")
+        for t, v in (("White", "w"), ("Black", "b"), ("Random", "r")):
+            ttk.Radiobutton(sf, text=t, value=v, variable=self.cfg_side_var
+                            ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(grid, text="Opponent:").grid(row=1, column=0, sticky="w", pady=4)
+        self.cfg_opp_var = tk.StringVar(value=self.cfg.opponent_key)
+        self.cfg_opp_cb = ttk.Combobox(grid, textvariable=self.cfg_opp_var,
+                                       state="readonly", width=20,
+                                       values=self._opponent_choices())
+        self.cfg_opp_cb.grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Button(grid, text="ⓘ", width=3,
+                   command=lambda: self.show_opponent_info(self.cfg_opp_var.get())
+                   ).grid(row=1, column=2, padx=2)
+        ttk.Button(grid, text="Engines…",
+                   command=self.dialog_engines).grid(row=1, column=3, padx=6)
+
+        ttk.Label(grid, text="Time control:").grid(row=2, column=0, sticky="w",
+                                                    pady=4)
+        self.cfg_tc_var = tk.StringVar(value=self.cfg.time_control[0])
+        tc_names = [n for n, _b, _i in self.TIME_CONTROLS]
+        ttk.Combobox(grid, textvariable=self.cfg_tc_var, state="readonly",
+                     values=tc_names, width=18).grid(row=2, column=1, sticky="w",
+                                                     padx=4)
+
+        ttk.Label(grid, text="Position FEN (optional):").grid(row=3, column=0,
+                                                               sticky="w", pady=4)
+        self.cfg_fen_var = tk.StringVar(value="")
+        ttk.Entry(grid, textvariable=self.cfg_fen_var, width=44).grid(
+            row=3, column=1, columnspan=3, sticky="w", padx=4)
+
+        self.cfg_book_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(grid, text="Veltrix uses its opening book",
+                        variable=self.cfg_book_var).grid(row=4, column=1,
+                                                         sticky="w", pady=4)
+
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=18)
+        ttk.Button(row, text="Start Game", command=self._config_start).pack(
+            side=tk.LEFT)
+        ttk.Button(row, text="Back", command=lambda: self.show_frame("menu")
+                   ).pack(side=tk.LEFT, padx=8)
+
+    def _opponent_choices(self):
+        vals = ["model:" + k for k in models.menu_choices()]
+        vals += ["engine:" + e.name for e in self.registry.playable()]
+        return vals
+
+    def _config_start(self):
+        side = self.cfg_side_var.get()
+        self.set_opponent(self.cfg_opp_var.get())
+        for n, b, i in self.TIME_CONTROLS:
+            if n == self.cfg_tc_var.get():
+                self.cfg.time_control = (n, b, i)
+                break
+        fen = self.cfg_fen_var.get().strip()
+        if fen:
+            try:
+                Board(fen)   # validates
+            except ValueError:
+                self.status("invalid FEN - starting from the normal position")
+                fen = ""
+        if self.engine:
+            self.engine.set_option("UseBook", "true" if self.cfg_book_var.get()
+                                   else "false")
+        self.cfg.save()
+        self.initial_fen = fen or STARTPOS_FEN
+        if side == "r":
+            side = random.choice("wb")
+        self.human_color = side
+        self.mode = "human_vs_engine"
+        self.new_game(side=side)
+        self.show_frame("game")
+
+    def _refresh_menu(self):
+        can_continue = (self.state.moves != [] and not self.result) or \
+            bool(self.cfg.resume_game)
+        st = "normal" if can_continue else "disabled"
+        try:
+            self._menu_btns["continue"].configure(state=st)
+        except Exception:
+            pass
+
+    def menu_continue(self):
+        """Back to the game screen; restore persisted game if not in memory."""
+        if self.state.moves == [] and self.cfg.resume_game:
+            self.restore_saved_game()
+        self.show_frame("game")
+
+    def menu_analyze(self):
+        if not self.state.moves:
+            self.status("no game to analyze yet - play or load one first")
+            self.show_frame("game")
+            return
+        self.show_frame("game")
+        if not self.analyzing:
+            self.toggle_analysis()
+
+    # -------------------------------------------------- resume (PART 5)
+    def save_resume_state(self):
+        """Persist the in-progress game so the next launch offers Continue."""
+        if not self.state.moves or self.result:
+            self.cfg.resume_game = None
+            return
+        self.cfg.resume_game = {
+            "initial_fen": self.initial_fen,
+            "moves": self.state.hist_uci(),
+            "sans": self.state.hist_sans(),
+            "clocks": {k: (v if v != float("inf") else "inf")
+                       for k, v in self.clocks.items()},
+            "incs": self.incs,
+            "opponent_key": self.cfg.opponent_key,
+            "human_color": self.human_color,
+            "mode": self.mode,
+        }
+
+    def restore_saved_game(self) -> bool:
+        rg = self.cfg.resume_game
+        if not rg:
+            return False
+        try:
+            moves = []
+            b = Board(rg["initial_fen"])
+            for u in rg["moves"]:
+                m = b.parse_uci(u)
+                moves.append(m)
+                b.push(m)
+        except (ValueError, KeyError, TypeError):
+            self.cfg.resume_game = None
+            return False
+        self.initial_fen = rg["initial_fen"]
+        self.mode = rg.get("mode", "human_vs_engine")
+        self.human_color = rg.get("human_color", "w")
+        self.set_opponent(rg.get("opponent_key", "model:High"))
+        self.state.reset(self.initial_fen)
+        self.state.load_moves(moves, rg.get("sans") or [])
+        self.clocks = {k: (float("inf") if v == "inf" else float(v))
+                       for k, v in rg.get("clocks", {}).items()} or \
+            {"w": float("inf"), "b": float("inf")}
+        self.incs = rg.get("incs", {"w": 0, "b": 0})
+        self.clock_active = self.clocks["w"] != float("inf")
+        self.result = None
+        self._sync_board_widget()
+        self.move_list_update()
+        self.status(f"resumed saved game ({len(rg['moves'])} plies)")
+        self.maybe_engine_move()
+        return True
+
+    def dialog_engines(self):
+        """External-engine registry manager: list/add/remove/enable/options;
+        Stockfish row honours PART 2 (absent is fine, nothing downloads)."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("External engines")
+        dlg.geometry("560x380")
+        sf_path = self.cfg.stockfish_path
+        sf_runs = ext_engines._runnable(sf_path) if sf_path else False
+        tk.Label(dlg, text=("Stockfish: " + (sf_path if sf_runs
+                 else "not found - use Browse to add it")),
+                 justify="left").pack(anchor="w", padx=10, pady=6)
+        row = tk.Frame(dlg)
+        row.pack(fill="x", padx=10)
+        tk.Button(row, text="Detect",
+                  command=lambda: self._stockfish_detect(dlg)).pack(side="left")
+        tk.Button(row, text="Browse…",
+                  command=lambda: self._stockfish_browse(dlg)).pack(side="left",
+                                                                    padx=6)
+        tk.Label(dlg, text="Registered engines:").pack(anchor="w", padx=10,
+                                                       pady=(10, 2))
+        lb = tk.Listbox(dlg, height=6)
+        lb.pack(fill="both", expand=True, padx=10)
+        for e in self.registry.list():
+            mark = "[on]" if e.enabled else "[off]"
+            role = " (stockfish)" if e.role == "stockfish" else ""
+            lb.insert("end", f"{mark} {e.name}{role} - {e.path}")
+        brow = tk.Frame(dlg)
+        brow.pack(fill="x", padx=10, pady=6)
+
+        def _sel():
+            sel = lb.curselection()
+            ents = self.registry.list()
+            return ents[sel[0]] if sel and sel[0] < len(ents) else None
+        tk.Button(brow, text="Add…",
+                  command=lambda: self._engine_add(dlg)).pack(side="left")
+        tk.Button(brow, text="Toggle",
+                  command=lambda: self._engine_toggle(dlg, _sel())).pack(
+            side="left", padx=4)
+        tk.Button(brow, text="Options…",
+                  command=lambda: self._engine_options(dlg, _sel())).pack(
+            side="left", padx=4)
+        tk.Button(brow, text="Remove",
+                  command=lambda: self._engine_remove(dlg, _sel())).pack(
+            side="left", padx=4)
+        tk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=6)
+
+    def _stockfish_detect(self, dlg):
+        path = ext_engines.detect_stockfish(self.cfg)
+        self.status("Stockfish detected: " + path if path
+                    else "no Stockfish found on PATH or usual locations")
+        dlg.destroy()
+        self.dialog_engines()
+
+    def _stockfish_browse(self, dlg):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(title="Choose Stockfish executable")
+        if not p:
+            return
+        if not ext_engines._runnable(p):
+            self.status(f"'{p}' did not start with the UCI handshake - ignored")
+            return
+        self.cfg.stockfish_path = p
+        self.registry.add_probed(p, role="stockfish")
+        self.status("Stockfish registered: " + p)
+        dlg.destroy()
+        self.dialog_engines()
+
+    def _engine_add(self, dlg):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(title="Choose a UCI engine executable")
+        if not p:
+            return
+        res, err = self.registry.add_probed(p)
+        if err:
+            self.status(err)
+            return
+        self.status(f"added engine {res[0].name}")
+        dlg.destroy()
+        self.dialog_engines()
+
+    def _engine_toggle(self, dlg, ent):
+        if ent:
+            ent.enabled = not ent.enabled
+            self.registry.save_entry(ent)
+            self.disconnect_ext_client()
+            dlg.destroy()
+            self.dialog_engines()
+
+    def _engine_remove(self, dlg, ent):
+        if ent:
+            self.registry.remove(ent.name)
+            try:
+                self.cfg.save()
+            except Exception:
+                pass
+            dlg.destroy()
+            self.dialog_engines()
+
+    def _engine_options(self, dlg, ent):
+        if not ent:
+            return
+        _id, specs = ext_engines.probe(ent.path)
+        if not specs and _id is None:
+            self.status(f"engine {ent.name} unreachable - options unknown")
+            return
+        ed = tk.Toplevel(dlg)
+        ed.title(f"{ent.name} options")
+        vars_ = {}
+        for i, s in enumerate(specs):
+            if s.type == "button":
+                continue
+            tk.Label(ed, text=s.name, anchor="w").grid(row=i, column=0,
+                                                       sticky="w", padx=8, pady=2)
+            v = tk.StringVar(value=str(ent.options.get(s.name, s.default)))
+            tk.Entry(ed, textvariable=v, width=14).grid(row=i, column=1, padx=6)
+            tk.Label(ed, text=s.summary, fg="#777").grid(row=i, column=2,
+                                                         sticky="w")
+            vars_[s.name] = v
+
+        def _save():
+            for k, v in vars_.items():
+                if v.get():
+                    ent.options[k] = v.get()
+            self.registry.save_entry(ent)
+            self.disconnect_ext_client()
+            ed.destroy()
+
+        tk.Button(ed, text="Save", command=_save).grid(row=len(specs), column=0,
+                                                       pady=8)
+        tk.Button(ed, text="Cancel", command=ed.destroy).grid(row=len(specs),
+                                                              column=1)
+
+    def dialog_settings(self):
+        """PART-5 settings hub (modal preferences window)."""
+        mb = tk.Toplevel(self.root)
+        mb.title("Settings")
+        mb.transient(self.root)
+
+        f = ttk.Frame(mb, padding=16)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="Settings", font=("TkDefaultFont", 15, "bold")).pack(
+            anchor="w", pady=(0, 10))
+
+        # ---- presentation ------------------------------------------------
+        pres = ttk.LabelFrame(f, text="board", padding=8)
+        pres.pack(fill=tk.X, pady=4)
+        ttk.Button(pres, text="Colors & theme\u2026",
+                   command=self.dialog_colors).grid(row=0, column=0,
+                                                    sticky="w", pady=2, padx=4)
+        ttk.Button(pres, text="Board size\u2026",
+                   command=self.dialog_size).grid(row=0, column=1,
+                                                  sticky="w", pady=2, padx=4)
+        ttk.Checkbutton(pres, text="highlight last move", variable=self.hl_last_var,
+                        command=self.apply_hl_options).grid(row=1, column=0,
+                                                            sticky="w", padx=4)
+        ttk.Checkbutton(pres, text="highlight check", variable=self.hl_check_var,
+                        command=self.apply_hl_options).grid(row=1, column=1,
+                                                            sticky="w", padx=4)
+        ttk.Checkbutton(pres, text="show legal targets", variable=self.hl_targets_var,
+                        command=self.apply_hl_options).grid(row=2, column=0,
+                                                            sticky="w", padx=4)
+
+        anim_var = tk.BooleanVar(value=self.cfg.animations)
+        def _anim():
+            self.cfg.animations = bool(anim_var.get())
+            self.apply_cfg_visual()
+            self.cfg.save()
+        ttk.Checkbutton(pres, text="piece-move animation", variable=anim_var,
+                        command=_anim).grid(row=2, column=1, sticky="w", padx=4)
+
+        # ---- sound (PART-10/11 toggles; engine for playback lands next) --
+        snd = ttk.LabelFrame(f, text="sound", padding=8)
+        snd.pack(fill=tk.X, pady=4)
+        snd_var = tk.BooleanVar(value=self.cfg.sound_on)
+        vol_var = tk.IntVar(value=self.cfg.sound_volume)
+        def _snd():
+            self.cfg.sound_on = bool(snd_var.get())
+            self.cfg.sound_volume = max(0, min(100, int(vol_var.get())))
+            self.cfg.save()
+        ttk.Checkbutton(snd, text="play move sounds", variable=snd_var,
+                        command=_snd).grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Scale(snd, from_=0, to=100, variable=vol_var,
+                  command=lambda _v: _snd()).grid(row=0, column=1, sticky="ew",
+                                                  padx=8)
+        snd.columnconfigure(1, weight=1)
+
+        # ---- engine / time -----------------------------------------------
+        eng = ttk.LabelFrame(f, text="engine & time", padding=8)
+        eng.pack(fill=tk.X, pady=4)
+        ttk.Button(eng, text="Time control\u2026",
+                   command=self.dialog_time_control).grid(row=0, column=0,
+                                                          sticky="w", padx=4)
+        ttk.Button(eng, text="Engine options\u2026",
+                   command=self.dialog_engine_options).grid(row=1, column=0,
+                                                            sticky="w", padx=4)
+        ttk.Button(eng, text="Engines\u2026",
+                   command=self.dialog_engines).grid(row=1, column=1,
+                                                     sticky="w", padx=4)
+
+        ttk.Button(f, text="Close", command=mb.destroy).pack(anchor="e", pady=8)
+
+    def dialog_about(self):
+        mb = tk.Toplevel(self.root)
+        mb.title("About Veltrix")
+        tk.Label(mb, text=(
+            "Veltrix 1.0\n\nAn open chess engine and trainer built around the\n"
+            "Veltrix C++ engine - honest play, honest evaluation, honest\n"
+            "claims: what you see is what the code actually does.\n\n"
+            "Levels and models change only real search budgets (positions\n"
+            "per move), verified by engine-vs-engine matches in tools/.\n"
+            "Veltrix never pretends to be other than it is."),
+            justify="left", padx=16, pady=12).pack()
+        tk.Button(mb, text="OK", command=mb.destroy).pack(pady=8)
 
     # ============================================================ visuals
     def apply_cfg_visual(self):
@@ -352,7 +778,7 @@ class VeltrixApp:
         self.canvas.light, self.canvas.dark = light, dark
         self.canvas.show_coords = self.cfg.show_coords
         self.canvas.flipped = self.cfg.flip_board
-        self.canvas.animation_ms = self.cfg.animation_ms
+        self.canvas.animation_ms = self.cfg.animation_ms if self.cfg.animations else 0
         self.canvas.set_size(self.cfg.board_size)
         self.apply_hl_options()
         self.canvas.redraw()
@@ -383,7 +809,7 @@ class VeltrixApp:
             return ((None, 0), (None, 0))
         return ((minutes * 60, inc), (minutes * 60, inc))
 
-    def new_game(self, side="w", keep_setup=False):
+    def new_game(self, side="w", keep_setup=False, silent=False):
         if not keep_setup:
             self.initial_fen = self.current_fen_base()
         # reset state (single authoritative object)
@@ -404,7 +830,8 @@ class VeltrixApp:
             self.engine2.new_game()
         self._sync_board_widget()
         self.move_list_update()
-        self.status(f"new game - you are {'White' if side == 'w' else 'Black'}")
+        if not silent:
+            self.status(f"new game - you are {'White' if side == 'w' else 'Black'}")
         self.maybe_engine_move()
 
     def current_fen_base(self):
@@ -461,6 +888,14 @@ class VeltrixApp:
                  "engine itself.\n\n" + detail,
                  justify="left", wraplength=380, padx=14, pady=12).pack()
         tk.Button(mb, text="OK", command=mb.destroy).pack(pady=6)
+
+    def menu_button(self):
+        self.save_resume_state()
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+        self.show_frame("menu")
 
     def show_model_info(self, key: str):
         """The \u24d8 button next to each model: factual description only."""
@@ -532,6 +967,7 @@ class VeltrixApp:
         if redraw:
             self._sync_board_widget()
         self.move_list_update()
+        self.save_resume_state()
 
     def undo_plies(self, n=1):
         """PART 8 semantics: take back n plies from the REAL game state -
@@ -1062,6 +1498,12 @@ class VeltrixApp:
 
     # ============================================================ shutdown
     def on_close(self):
+        self.cancel_engine_search()
+        self.save_resume_state()
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
         self.disconnect_ext_client()
         self.status("shutting down engines…")
         try:

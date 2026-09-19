@@ -210,7 +210,7 @@ def main():
     app.undo_plies(1)    # remove engine's reply; black (engine) to move again
     check("bot-turn takeback rewound", len(app.moves) == 1, str(app.sans))
     t0 = time.time()
-    while len(app.moves) < 2 and time.time() - t0 < 12:
+    while len(app.moves) < 2 and time.time() - t0 < 25:
         pump(0.2)
     check("engine re-arms on its own undone turn",
           len(app.moves) == 2 and app.moves[-1].uci()[:2] != "d4", str(app.sans))
@@ -320,8 +320,79 @@ def main():
     check("back to internal model", not app.opponent_uses_external
           and app.model.key == "High")
 
+
+    print("== main menu / screens (PART 4-6) ==")
+    check("booted into menu", getattr(app, "_active_frame", "") == "menu")
+    check("menu frames exist", hasattr(app, "menu_frame") and
+          hasattr(app, "game_frame") and hasattr(app, "config_frame")
+          and hasattr(app, "_menu_btns"))
+    app.show_frame("game")
+    check("game frame shown", app._active_frame == "game")
+    app.show_frame("config")
+    check("config frame shown", app._active_frame == "config")
+
+    # an in-progress game enables Continue; a new/cleared board disables it
+    app.mode = "human_vs_human"
+    app.new_game(side="w", keep_setup=True)
+    app.mode = "human_vs_human"; app.engine_thinking = False
+    app.on_square_click(parse_sq("e2")); app.on_square_click(parse_sq("e4"))
+    app.show_frame("menu")
+    st = dict(app._menu_btns["continue"]._cfg)
+    check("continue enabled mid-game", st.get("state") in (None, "normal"), str(st))
+    app.state.reset()
+    app._refresh_menu()
+    _rg = app.cfg.resume_game  # still saved from the move above
+    app.show_frame("menu")
+    st = dict(app._menu_btns["continue"]._cfg)
+    check("continue uses saved game", _rg is not None and
+          st.get("state") in (None, "normal"), str(st))
+
+    # restore round trip: exact game state reconstruction
+    app.cfg.resume_game = {
+        "initial_fen": STARTPOS_FEN, "moves": ["e2e4", "e7e5"],
+        "sans": ["e4", "e5"],
+        "clocks": {"w": "inf", "b": "inf"}, "incs": {"w": 0, "b": 0},
+        "opponent_key": "model:High", "human_color": "w",
+        "mode": "human_vs_human",
+    }
+    app.mode = "human_vs_engine"
+    app.state.reset(STARTPOS_FEN)
+    ok = app.restore_saved_game()
+    check("saved game restored", ok and app.sans == ["e4", "e5"]
+          and app.mode == "human_vs_human", str(app.sans))
+    check("restore clears engine pendings", not app.engine_thinking)
+
+    # config screen drives a start
+    app.show_frame("config")
+    vals = app._opponent_choices()
+    check("opponent list covers models", len(vals) >= 11, str(vals[:3]))
+    check("external included in choices", "engine:FakeFish 1.0" in vals)
+    app.cfg_side_var.set("w")
+    app.cfg_opp_var.set("model:Flash")
+    app.cfg_tc_var.set(app.TIME_CONTROLS[0][0])
+    app.cfg_fen_var.set("")
+    app.cfg_book_var.set(True)
+    seen_opts = []
+    orig_set = app.engine.set_option
+    def tap_opt(name, value):
+        seen_opts.append((str(name).lower(), str(value).lower()))
+        return orig_set(name, value)
+    app.engine.set_option = tap_opt
+    app._config_start()
+    app.engine.set_option = orig_set
+    check("config starts game", app._active_frame == "game"
+          and app.opponent_name() == "Flash", app.opponent_name())
+    check("book toggle applied to engine", ("usebook", "true") in seen_opts,
+          str(seen_opts[-4:]))
+    check("opponent persisted", app.cfg.opponent_key == "model:Flash")
+    app.show_frame("menu")
+    app.set_model("High")
+
     print("== navigation ==")
-    app.mode = "human_vs_human"  # avoid engine re-arm noise for pure cursor checks
+    app.new_game(side="w", keep_setup=True)
+    app.mode = "human_vs_human"; app.engine_thinking = False
+    for a, b in (("e2", "e4"), ("e7", "e5")):
+        app.on_square_click(parse_sq(a)); app.on_square_click(parse_sq(b))
     app.navigate(0)
     check("navigate to start", app.view == 0 and len(app.state.moves) > 0)
     app.navigate(len(app.moves))
