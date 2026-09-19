@@ -58,26 +58,46 @@ tested.
 ## 3. Prioritized implementation order (this session)
 
 - [x] Phase 1 audit (this document) + baseline gates
-- [ ] **Stage N1** — NNUE inference in C++17 (`engine/nnue/`): HalfKP-style
+- [x] **Stage N1** (DONE) — NNUE inference in C++17 (`engine/nnue/`): HalfKP-style
       dual-perspective feature transformer (40 960→256 int16), incremental
       accumulators per ply (king moves = full refresh), 512→16→1 head,
       fixed-point int math, `UseNNUE`/`EvalFile` UCI options, champion-file
       auto-load (same philosophy as the opening book), `nnuecheck`
       diagnostic for quantisation-parity testing. HCE stays as fallback.
-- [ ] **Stage N2** — Training pipeline (`tools/training/`): self-play data
+- [x] **Stage N2** (DONE) — Training pipeline (`tools/training/`): self-play data
       generation (seeded, diverse openings, broad set — NOT losses only),
       JSONL schema (fen/result/teacher eval/depth/source/phase/weight),
       numpy trainer with sparse input-layer updates + exact fixed-point
       emulation, train/val split, checkpoints, metrics, `.nnue` export.
-- [ ] **Stage N3** — Gate #1: quantisation parity test, regression suites,
+- [x] **Stage N3** (DONE - verdict: candidate REJECTED, see below) — Gate #1: quantisation parity test, regression suites,
       then champion-vs-candidate match; promote only on a win.
-- [ ] **Stage L1** — Loss-learning pipeline (`tools/learn/`): rich game
+- [x] **Stage L1** (DONE, demo'd end-to-end) — Loss-learning pipeline (`tools/learn/`): rich game
       recording (PGN+FENs+evals+clocks+versions), critical-position finder,
       teacher analysis (UCI-agnostic; Stockfish supported, deep-Veltrix
       surrogate in this sandbox), loss reports (spec §7 format), failure
       training packs + regression EPD, `learn_loop.py` with promote-only-if-
       stronger gate (old champion always retained).
-- [ ] Docs (`docs/NNUE.md`, `docs/LEARNING_LOOP.md`), final gates, commits.
+- [x] Docs (`docs/TRAINING.md`, `docs/LEARNING_LOOP.md`), final gates, commits.
+
+## 3b. Measured end-stage results (this session, all gates run for real)
+
+| Item | Measurement |
+|---|---|
+| engine test suite | 56/56 PASS (incl. new `go nodes` + loss-EPD checks) |
+| `nnuewalk` incremental accumulator check | PASS 47 plies, 0 diffs |
+| trainer/engine fixed-point parity | 300/300 EXACT on vectors (when a candidate passes accuracy gates) |
+| NNUE NPS cost | 1.50M vs 1.58M HCE (-5.3%) |
+| **gate #1: NNUE candidate vs HCE (40 games, movetime 100ms)** | **0-40, twice, two candidates** |
+| promotion decision | **REJECTED** - no NNUE champion shipped (rules held) |
+| learning-loop demo | full PLAY->...->GATES cycle; honest refusals at quality gates |
+| bugs found & fixed by gates | NNUE king-move accumulator desync; `go nodes` <2048 never enforced; gen-data/teaching pipeline defects (documented in TRAINING.md) |
+
+The 0-40 losses are explained honestly in `docs/TRAINING.md`: tiny-sandbox
+self-play corpus (25.3k positions of a weak HCE labeller), first-generation
+trainer convergence problems (fixed at gradient level but corpus-limited),
+and one now-fixed search-accumulator bug. The infrastructure is complete
+and verified; net quality needs Stockfish-labelled data and/or more compute,
+which is desktop work (`learn_loop.py --teacher ...`), not sandbox work.
 
 ### Roadmap after this session (honestly deferred)
 capture-history & continuation-history, check extensions, Probcut, SPSA

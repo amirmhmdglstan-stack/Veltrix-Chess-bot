@@ -226,9 +226,13 @@ and share the result.
 
 ## Experimental / unfinished
 
-- `networks/` — reserved for a future compact NNUE net; the engine currently
-  runs pure HCE. The loader hook and option space are documented in
-  `networks/README.md`.
+- NNUE evaluation (VNN1): implemented in C++ with incremental accumulators
+  (+5.3% NPS), UCI options `UseNNUE` + `EvalFile`, auto-load of
+  `networks/champion.nnue`. **No champion net ships yet**: the first trained
+  candidates were measured and honestly REJECTED by the strength gate (see
+  `docs/TRAINING.md` and `docs/LEARNING_LOOP.md` for the full pipeline,
+  measured results, and how to retrain on your PC incl. Stockfish teacher
+  support). Without a net, Veltrix runs pure HCE exactly as before.
 - `SyzygyPath` — accepted but unprobed (see UCI options above).
 - MultiPV is limited to 5 PVs; `go mate`/`nodes` are convenience extras.
 

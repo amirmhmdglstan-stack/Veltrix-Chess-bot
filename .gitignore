@@ -10,3 +10,7 @@ __pycache__/
 *.o
 *.obj
 *.pgn.saved
+
+# learning-loop working artifacts (binaries are rebuildable; keep logs/reports)
+tools/learn/arena/
+data/learn/*.pgn

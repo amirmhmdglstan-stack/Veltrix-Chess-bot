@@ -193,3 +193,19 @@ and runs the benchmark.
 - `tools/epd_test.py` — feed the engine tactical puzzles.
 - `tools/match.py` / `tools/sprt.py` — compare two engine builds.
 - `engine/src/` — the engine source code, commented for study.
+
+## The learning loop (optional, for the curious)
+
+Veltrix can review its own games, figure out *why* it lost, and train an
+improved evaluation from the verdicts — with Stockfish as the teacher if you
+have one installed (any UCI engine works):
+
+```bash
+python3 tools/learn/learn_loop.py --iters 4 --games 32 --movetime 200 \
+    --teacher /path/to/stockfish
+```
+
+Read `docs/LEARNING_LOOP.md` first. The loop can only promote a new
+evaluation after it passes regression tests *and* wins matches against the
+current engine - a weaker candidate is always rejected, and your champion is
+never overwritten without proof.
