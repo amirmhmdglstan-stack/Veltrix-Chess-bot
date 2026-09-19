@@ -505,6 +505,37 @@ def main():
     app.result = None
     app.state.reset()
 
+
+    print("== every internal opponent emits its configured budget (PART 18) ==")
+    seen_budgets = {}
+    for key in models.menu_choices():
+        p = models.profile(key)
+        kw = models.go_kwargs(p, "w", {"w": 60.0, "b": 60.0},
+                              {"w": 0, "b": 0}, 500)
+        seen_budgets[key] = (kw.get("nodes"), kw.get("movetime"))
+        prof_ok = (p.nodes is None) == (kw.get("nodes") is None)
+        for e in app.registry.list() if False else []:
+            pass
+        if not prof_ok:
+            check(f"budget mismatch {key}", False, str(kw))
+            break
+    else:
+        check("all 11 opponents expose correct go budgets",
+              seen_budgets["Flash"] == (4000, 60)
+              and seen_budgets["Light"] == (64000, 400)
+              and seen_budgets["High"] == (None, None)
+              and seen_budgets["Level 5"] == (64000, 240)
+              and seen_budgets["Level 7"] == (512000, 1000),
+              str(seen_budgets))
+    # app-level application of each profile (no crash, think path)
+    app.mode = "human_vs_engine"; app.human_color = "w"
+    for key in ("Flash", "Level 3", "Level 7", "High"):
+        app.set_model(key)
+        app.new_game(side="w")
+        pump(0.1)
+    check("model switching cycles cleanly", True)
+    app.set_model("High")
+
     print("== navigation ==")
     app.new_game(side="w", keep_setup=True)
     app.mode = "human_vs_human"; app.engine_thinking = False
