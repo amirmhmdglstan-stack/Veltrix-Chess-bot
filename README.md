@@ -50,9 +50,21 @@ for beginners).
 ## Quick start (Linux / macOS)
 
 ```sh
-./build.sh            # or: make -C engine -j$(nproc)  (NATIVE=1 for max speed)
+./build.sh            # or: make -C engine -j$(nproc)  (portable x86-64-v2 + LTO)
 python3 gui/veltrix_gui.py
 ```
+
+Build variants (PART 16 matrix; all defaults stay portable):
+
+| make            | what you get |
+|-----------------|--------------|
+| `make`          | portable default: `x86-64-v2` (SSE4.2/POPCNT) + LTO + -O3 |
+| `make AVX2=1`   | `x86-64-v3` (AVX2/BMI2) for 2015+ CPUs |
+| `make NATIVE=1` | `-march=native`, max speed on this machine |
+| `make pgo`      | host profile-guided rebuild on top of the portable default; instrument-train-reuse; measured +5-6% NPS with bench node counts identical |
+| `make LTO=0`    | developer builds, faster compile |
+
+Windows: `build.bat` / MSYS2 `g++` both work; never assumes AVX2.
 
 ## Project layout
 

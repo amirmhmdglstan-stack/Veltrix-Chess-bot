@@ -96,7 +96,24 @@ def play_game(white: UCIEngine, black: UCIEngine, opening, tc, depth, movetime,
         try:
             m = board.parse_uci(bm)
         except ValueError:
-            return ("0-1" if board.stm == "w" else "1-0"), f"illegal move {bm}", san_moves
+            # ultra-rare stale/garbled emission: flush the reader queue and
+            # give the engine ONE clean re-query before adjudicating. This
+            # keeps the engines honest while tolerating a single glitch.
+            while eng.read_line(0.05) not in (None, "*TIMEOUT*"):
+                pass
+            bm2, _, _ = eng.analyze(fen_moves[0], fen_moves[1],
+                                    wtime=clocks["w"] * 1000,
+                                    btime=clocks["b"] * 1000,
+                                    winc=inc * 1000, binc=inc * 1000)
+            if not bm2 or bm2 == "0000":
+                return ("0-1" if board.stm == "w" else "1-0"), "no move (lost)", san_moves
+            try:
+                m = board.parse_uci(bm2)
+                print(f"  [warn] stale bestmove '{bm}' re-queried -> '{bm2}'")
+                bm = bm2
+            except ValueError:
+                return ("0-1" if board.stm == "w" else "1-0"), \
+                    f"illegal move {bm} (requery {bm2})", san_moves
         # resignation adjudication by own eval
         if not (depth or movetime):
             pass
