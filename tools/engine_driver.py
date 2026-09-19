@@ -81,9 +81,8 @@ class UCIEngine:
         self.wait_for("readyok", 15)
 
     # --------------------------------------------------------------- search
-    def analyze(self, fen: str, moves: list[str], *, depth=None, movetime=None,
-                wtime=None, btime=None, winc=0, binc=0, movestogo=None,
-
+    def analyze(self, fen: str, moves: list[str], *, depth=None, nodes=None,
+                movetime=None, wtime=None, btime=None, winc=0, binc=0, movestogo=None,
                 multipv=1, silent=False):
         pos = "startpos" if fen in ("startpos", "") else f"fen {fen}"
         cmd = f"position {pos}" + (" moves " + " ".join(moves) if moves else "")
@@ -91,6 +90,8 @@ class UCIEngine:
         go = "go"
         if depth:
             go += f" depth {depth}"
+        if nodes:
+            go += f" nodes {int(nodes)}"
         if movetime:
             go += f" movetime {int(movetime)}"
         if wtime is not None:

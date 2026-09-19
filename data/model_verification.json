@@ -1,0 +1,111 @@
+{
+ "engine": "/home/user/Veltrix-Chess-bot/engine/veltrix",
+ "games_per_pair": 16,
+ "ref_unlimited_nodes": 1000000,
+ "pairs": [
+  {
+   "hi": "Flash",
+   "lo": "Level 1",
+   "nodes_hi": 4000,
+   "nodes_lo": 4000,
+   "wins_hi": 14,
+   "wins_lo": 14,
+   "draws": 12,
+   "score_hi": 20.0,
+   "games": 40,
+   "same_config": true,
+   "seconds": 27.4
+  },
+  {
+   "hi": "Level 2",
+   "lo": "Level 1",
+   "nodes_hi": 8000,
+   "nodes_lo": 4000,
+   "wins_hi": 30,
+   "wins_lo": 8,
+   "draws": 2,
+   "score_hi": 31.0,
+   "games": 40,
+   "same_config": false,
+   "seconds": 51.0
+  },
+  {
+   "hi": "Level 3",
+   "lo": "Level 2",
+   "nodes_hi": 16000,
+   "nodes_lo": 8000,
+   "wins_hi": 32,
+   "wins_lo": 3,
+   "draws": 5,
+   "score_hi": 34.5,
+   "games": 40,
+   "same_config": false,
+   "seconds": 59.7
+  },
+  {
+   "hi": "Level 4",
+   "lo": "Level 3",
+   "nodes_hi": 32000,
+   "nodes_lo": 16000,
+   "wins_hi": 30,
+   "wins_lo": 4,
+   "draws": 6,
+   "score_hi": 33.0,
+   "games": 40,
+   "same_config": false,
+   "seconds": 75.3
+  },
+  {
+   "hi": "Level 5",
+   "lo": "Level 4",
+   "nodes_hi": 64000,
+   "nodes_lo": 32000,
+   "wins_hi": 8,
+   "wins_lo": 2,
+   "draws": 6,
+   "score_hi": 11.0,
+   "games": 16,
+   "same_config": false,
+   "seconds": 32.9
+  },
+  {
+   "hi": "Level 6",
+   "lo": "Level 5",
+   "nodes_hi": 128000,
+   "nodes_lo": 64000,
+   "wins_hi": 10,
+   "wins_lo": 3,
+   "draws": 3,
+   "score_hi": 11.5,
+   "games": 16,
+   "same_config": false,
+   "seconds": 77.8
+  },
+  {
+   "hi": "Level 7",
+   "lo": "Level 6",
+   "nodes_hi": 512000,
+   "nodes_lo": 128000,
+   "wins_hi": 11,
+   "wins_lo": 0,
+   "draws": 5,
+   "score_hi": 13.5,
+   "games": 16,
+   "same_config": false,
+   "seconds": 217.8
+  },
+  {
+   "hi": "Level 8",
+   "lo": "Level 7",
+   "nodes_hi": 1000000,
+   "nodes_lo": 512000,
+   "wins_hi": 5,
+   "wins_lo": 3,
+   "draws": 8,
+   "score_hi": 9.0,
+   "games": 16,
+   "same_config": false,
+   "seconds": 457.8
+  }
+ ]
+}

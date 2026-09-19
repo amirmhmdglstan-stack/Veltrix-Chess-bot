@@ -44,6 +44,10 @@ class Config:
     hash_mb: int = 256
     threads: int = 0                  # 0 = auto (min(4, cores)); set >0 to force
     move_time_ms: int = 500             # engine move time for "unlimited/very fast" modes
+    model: str = "High"                 # opponent model/level key (gui/models.py)
+    opponent_key: str = "model:High"    # "model:<key>" or "engine:<name>"
+    stockfish_path: str = ""            # detected or manual; '' = absent
+    external_engines: list = None       # registry (gui/ext_engines.py)
     time_control: tuple = ("10 min rapid", 10, 0)
     # white/black can have individual base+inc when custom
     custom_minutes_white: float = 5.0

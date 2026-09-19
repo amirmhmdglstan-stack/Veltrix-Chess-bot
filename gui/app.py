@@ -24,6 +24,8 @@ from dialogs import PromotionDialog, TimeControlDialog, ColorsDialog, \
 from board_widget import BoardCanvas, UNICODE_PIECES                         # noqa: E402
 from theme import THEMES                                                     # noqa: E402
 from game_state import GameState                                             # noqa: E402
+import models                                                                # noqa: E402
+import ext_engines                                                           # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = "Veltrix 1.0"
@@ -68,6 +70,15 @@ class VeltrixApp:
         self.engine: UCIClient | None = None
         self.engine2: UCIClient | None = None
         self.engine_path = self.cfg.engine_path or find_engine(HERE) or ""
+        self.model = models.profile(self.cfg.model
+                                    if self.cfg.model in models.ALL else "High")
+        self.registry = ext_engines.EngineRegistry(self.cfg)
+        try:
+            ext_engines.detect_stockfish(self.cfg)   # optional, never fatal
+        except Exception:
+            pass
+        if not str(self.cfg.opponent_key or "").startswith("engine:"):
+            self.cfg.opponent_key = "model:" + self.model.key
         self._connect_engine()
 
         # ---------------- UI ----------------
@@ -122,6 +133,66 @@ class VeltrixApp:
             self._apply_engine_options(self.engine)
         self.engine_thinking = False
 
+    @property
+    def opponent_uses_external(self) -> bool:
+        return str(self.cfg.opponent_key or "").startswith("engine:")
+
+    def opponent_name(self) -> str:
+        if self.opponent_uses_external:
+            return self.cfg.opponent_key[len("engine:"):]
+        return self.model.key
+
+    def set_opponent(self, key: str, friendly: str = ""):
+        """Central opponent switch: 'model:<key>' or 'engine:<name>'."""
+        self.cfg.opponent_key = key
+        if key.startswith("model:"):
+            self.set_model(key[len("model:"):])
+        else:
+            self.disconnect_ext_client()
+            self.status(f"opponent: external engine {friendly or key[len('engine:'):]}")
+
+    def _ext_engine_entry(self):
+        if not self.opponent_uses_external:
+            return None
+        name = self.cfg.opponent_key[len("engine:"):]
+        for e in self.registry.list():
+            if e.name == name and e.enabled:
+                return e
+        return None
+
+    def ext_client(self, ent):
+        """Live client for the chosen external engine (re)spawned on change."""
+        cur = getattr(self, "_ext_client", None)
+        if cur and getattr(cur, "_ext_path", None) != ent.path:
+            self.disconnect_ext_client()
+            cur = None
+        if cur is None:
+            c = UCIClient(ent.path)
+            if not c.start():
+                self.status(f"could not start {ent.name}")
+                return None
+            c._ext_path = ent.path
+            self._apply_engine_options(c)
+            for k, v in (ent.options or {}).items():
+                c.set_option(k, v)
+            self._ext_client = c
+        return self._ext_client
+
+    def disconnect_ext_client(self):
+        c = getattr(self, "_ext_client", None)
+        if c:
+            try:
+                c.quit()
+            except Exception:
+                pass
+            self._ext_client = None
+
+    def set_model(self, key: str):
+        if key in models.ALL:
+            self.model = models.profile(key)
+            self.cfg.model = key
+            self.status(f"opponent model: {self.model.key} - {self.model.budget_summary()}")
+
     def _apply_engine_options(self, client: UCIClient):
         if not client:
             return
@@ -131,6 +202,7 @@ class VeltrixApp:
             threads = max(1, min(4, (os.cpu_count() or 2)))
         client.set_option("Threads", threads)
         client.set_option("MultiPV", self.cfg.multipv if self.cfg.show_engine_lines else 1)
+        models.apply_options(client, self.model, use_book=True)
         if self.cfg.limit_strength:
             client.set_option("UCI_LimitStrength", "true")
             client.set_option("UCI_Elo", self.cfg.engine_elo)
@@ -352,9 +424,53 @@ class VeltrixApp:
         for i, (t, v) in enumerate((("White", "w"), ("Black", "b"), ("Random", "r"))):
             ttk.Radiobutton(dlg, text=t, value=v, variable=side_var).grid(
                 row=0, column=1 + i, padx=6)
-        ttk.Button(dlg, text="Start", command=lambda: (dlg.destroy(), self._start_chosen(side_var.get()))).grid(
-            row=1, column=0, columnspan=4, pady=8)
+        ttk.Label(dlg, text="Opponent:").grid(row=1, column=0, padx=8, sticky="w")
+        opp_values = ["model:" + k for k in models.menu_choices()]
+        opp_values += ["engine:" + e.name for e in self.registry.playable()]
+        cur = self.cfg.opponent_key if self.cfg.opponent_key in opp_values \
+            else "model:" + self.model.key
+        model_var = tk.StringVar(value=cur)
+        ttk.Combobox(dlg, textvariable=model_var, values=opp_values,
+                     state="readonly", width=16).grid(row=1, column=1, columnspan=2,
+                                                      padx=6, sticky="w")
+        ttk.Button(dlg, text="\u24d8", width=3,
+                   command=lambda: self.show_opponent_info(model_var.get())).grid(
+            row=1, column=3, padx=2)
+        def _start():
+            self.set_opponent(model_var.get())
+            dlg.destroy()
+            self._start_chosen(side_var.get())
+        ttk.Button(dlg, text="Engines\u2026",
+                   command=self.dialog_engines).grid(row=3, column=0, columnspan=2,
+                                                     pady=4)
+        ttk.Button(dlg, text="Start", command=_start).grid(
+            row=2, column=0, columnspan=4, pady=8)
         dlg.wait_window()
+
+    def show_opponent_info(self, key: str):
+        if key.startswith("engine:"):
+            ent = {e.name: e for e in self.registry.list()}.get(key[len("engine:"):])
+            detail = (ent.path if ent else key) +                 ("\ncustom options: " + str(ent.options) if ent and ent.options else "")
+            self.status("external engine: " + (ent.name if ent else key))
+        else:
+            self.show_model_info(key[len("model:"):])
+            return
+        mb = tk.Toplevel(self.root)
+        mb.title("External engine")
+        tk.Label(mb, text="External UCI engine - options are read from the "
+                 "engine itself.\n\n" + detail,
+                 justify="left", wraplength=380, padx=14, pady=12).pack()
+        tk.Button(mb, text="OK", command=mb.destroy).pack(pady=6)
+
+    def show_model_info(self, key: str):
+        """The \u24d8 button next to each model: factual description only."""
+        p = models.profile(key)
+        self.status(f"{p.key}: {p.blurb} [{p.budget_summary()}]")
+        mb = tk.Toplevel(self.root)
+        mb.title(f"About {p.key}")
+        tk.Label(mb, text=p.blurb + "\n\n" + p.budget_summary(),
+                 justify="left", wraplength=380, padx=14, pady=12).pack()
+        tk.Button(mb, text="OK", command=mb.destroy).pack(pady=6)
 
     def _start_chosen(self, side):
         if side == "r":
@@ -541,7 +657,12 @@ class VeltrixApp:
         stm = self.board.stm
         if not self.side_is_engine(stm):
             return
-        client = self.engine if (self.mode == "human_vs_engine" or stm == "w") else self.engine2
+        is_kind_my_engine = (self.mode == "human_vs_engine" and not self.opponent_uses_external)
+        client = self.engine if (is_kind_my_engine or stm == "w" and
+                                 self.mode != "human_vs_engine") else self.engine2
+        if self.mode == "human_vs_engine" and self.opponent_uses_external:
+            ent = self._ext_engine_entry()
+            client = self.ext_client(ent) if ent else None
         if client is None:
             client = self.engine
         if client is None or not client.alive:
@@ -549,11 +670,11 @@ class VeltrixApp:
         client.set_position("startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen,
                             self.state.hist_uci())
         self._go_serial[client] = self.state.serial
-        if "inf" in str(self.clocks[stm]) or self.clocks[stm] == float("inf"):
-            client.go(movetime=self.cfg.move_time_ms)
-        else:
-            client.go(wtime=self.clocks["w"] * 1000, btime=self.clocks["b"] * 1000,
-                      winc=self.incs["w"] * 1000, binc=self.incs["b"] * 1000)
+        prof = self.model
+        if self.mode == "human_vs_engine" and self.opponent_uses_external:
+            prof = models.profile("High")  # externals: full clock, own opts
+        client.go(**models.go_kwargs(prof, stm, self.clocks, self.incs,
+                                     self.cfg.move_time_ms))
         self.engine_thinking = True
         self.status(f"engine thinking as {'white' if stm == 'w' else 'black'}…")
 
@@ -647,7 +768,8 @@ class VeltrixApp:
         self.lbl_top_player.configure(text=(bname if white_bottom else wname) + (" ←" if white_to_move != white_bottom else ""))
 
     def _pump_engine_events(self):
-        for client in (self.engine, self.engine2):
+        ext = getattr(self, "_ext_client", None)
+        for client in (self.engine, self.engine2, ext):
             if not client:
                 continue
             for ev in client.poll():
@@ -940,6 +1062,7 @@ class VeltrixApp:
 
     # ============================================================ shutdown
     def on_close(self):
+        self.disconnect_ext_client()
         self.status("shutting down engines…")
         try:
             self.cfg.flip_board = self.flip_var.get()

@@ -165,13 +165,15 @@ class UCIClient:
             cmd += " moves " + " ".join(moves)
         self.send(cmd)
 
-    def go(self, *, depth=None, movetime=None, wtime=None, btime=None,
+    def go(self, *, depth=None, nodes=None, movetime=None, wtime=None, btime=None,
            winc=0, binc=0, movestogo=None, infinite=False):
         cmd = "go"
         if infinite:
             cmd += " infinite"
         if depth:
             cmd += f" depth {depth}"
+        if nodes:
+            cmd += f" nodes {int(nodes)}"
         if movetime:
             cmd += f" movetime {int(movetime)}"
         if wtime is not None:

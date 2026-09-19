@@ -216,6 +216,110 @@ def main():
           len(app.moves) == 2 and app.moves[-1].uci()[:2] != "d4", str(app.sans))
 
     # ---------------- C. jump-style navigation on real state ----------
+
+    print("== model configuration (PART 1) ==")
+    import models
+    # registry invariants
+    check("Level 1 is Flash", models.profile("Level 1") is models.profile("Flash")
+          and models.profile("Flash").nodes == 4000)
+    check("Level 8 is High (unlimited)", models.profile("Level 8") is
+          models.profile("High") and models.profile("High").unlimited)
+    ladder = [models.profile(f"Level {i}") for i in range(1, 8)]
+    nodes_seq = [p.nodes if p.nodes is not None else float("inf") for p in ladder]
+    check("levels strictly increase until unlimited top",
+          all(a < b for a, b in zip(nodes_seq, nodes_seq[1:])))
+    check("menu order: 3 models + 8 levels", len(models.menu_choices()) == 11)
+    # go kwargs: model caps stack on top of the time control
+    kw = models.go_kwargs(models.profile("Flash"), "w",
+                          {"w": 60.0, "b": 60.0}, {"w": 0, "b": 0}, 500)
+    check("Flash gets nodes cap", kw.get("nodes") == 4000, str(kw))
+    check("Flash movetime capped", kw.get("movetime") == 60, str(kw))
+    kw = models.go_kwargs(models.profile("High"), "w",
+                          {"w": 60.0, "b": 60.0}, {"w": 0, "b": 0}, 500)
+    check("High uncapped", "nodes" not in kw and "movetime" not in kw, str(kw))
+    kw = models.go_kwargs(models.profile("Light"), "w",
+                          {"w": float("inf"), "b": float("inf")}, {"w": 0, "b": 0}, 500)
+    check("Light unlimited-TC movetime=floor", kw.get("movetime") == 400, str(kw))
+
+    # the app really sends the model budget to the engine
+    app.set_model("Flash")
+    check("model persisted in cfg", app.cfg.model == "Flash")
+    sent = []
+    orig_go = app.engine.go
+    def tap_go(**kw):
+        sent.append(kw)
+        return orig_go(**kw)
+    app.engine.go = tap_go
+    app.mode = "human_vs_engine"
+    app.new_game(side="w")
+    app.on_square_click(parse_sq("g2")); app.on_square_click(parse_sq("g3"))
+    t0 = time.time()
+    while not sent and time.time() - t0 < 8:
+        pump(0.2)
+    check("engine go carries Flash nodes", sent and sent[0].get("nodes") == 4000,
+          str(sent))
+    t0 = time.time()
+    while len(app.moves) < 2 and time.time() - t0 < 10:
+        pump(0.2)
+    check("Flash answered", len(app.moves) >= 2, str(app.sans))
+    app.engine.go = orig_go
+    app.set_model("High")
+    check("back to High", app.model.key == "High" and app.model.unlimited)
+
+
+    print("== external engines (PART 2/3) ==")
+    import ext_engines
+    fake_path = os.path.join(ROOT, "fake_engine.py")
+    # graceful absence / invalid paths: probe never explodes
+    nm, specs = ext_engines.probe(fake_path)
+    check("fake engine probed", nm == "FakeFish 1.0" and len(specs) >= 2, repr(nm))
+    check("options read dynamically",
+          any(s.name == "Skill Level" and s.type == "spin" and s.min == "0"
+              and s.max == "20" for s in specs),
+          str([(s.name, s.type) for s in specs]))
+    nm2, _ = ext_engines.probe("/nonexistent/engine-x")
+    check("invalid path probes gracefully", nm2 is None)
+    nm3, _ = ext_engines.probe("/bin/ls")
+    check("non-engine probes gracefully", nm3 is None)
+
+    # registry roundtrip + persistence
+    ent = ext_engines.ExternalEngine(name="FakeFish 1.0", path=fake_path,
+                                     options={"Skill Level": "0"})
+    app.cfg.external_engines = []
+    app.registry = ext_engines.EngineRegistry(app.cfg)
+    app.registry.save_entry(ent)
+    app.cfg.save()
+    import config_store as cs_mod
+    c2 = cs_mod.Config.load()
+    reg2 = ext_engines.EngineRegistry(c2)
+    found = [e for e in reg2.list() if e.name == "FakeFish 1.0"]
+    check("registry persisted", found and found[0].path == fake_path
+          and found[0].options.get("Skill Level") == "0")
+
+    # stockfish detection must fail GRACEFULLY, never crash
+    old_run = ext_engines._runnable
+    ext_engines._runnable = lambda p: False
+    app.cfg.stockfish_path = ""
+    sf = ext_engines.detect_stockfish(app.cfg)
+    check("absent stockfish handled", sf == "" and app.cfg.stockfish_path == "")
+    ext_engines._runnable = old_run
+
+    # the app plays a game against the registered external engine
+    app.set_opponent("engine:FakeFish 1.0")
+    check("external opponent active", app.opponent_uses_external)
+    app.new_game(side="w")
+    app.on_square_click(parse_sq("e2")); app.on_square_click(parse_sq("e4"))
+    t0 = time.time()
+    while len(app.moves) < 2 and time.time() - t0 < 10:
+        pump(0.2)
+    check("external engine replied", len(app.moves) >= 2, str(app.sans))
+    # options flowed into the external process (fake echoes skill in info pv)
+    ext_cli = getattr(app, "_ext_client", None)
+    check("ext client live", ext_cli is not None and ext_cli.alive)
+    app.set_opponent("model:High")
+    check("back to internal model", not app.opponent_uses_external
+          and app.model.key == "High")
+
     print("== navigation ==")
     app.mode = "human_vs_human"  # avoid engine re-arm noise for pure cursor checks
     app.navigate(0)
