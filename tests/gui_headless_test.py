@@ -438,6 +438,73 @@ def main():
     app.apply_cfg_visual()
     check("animation re-enabled", app.canvas.animation_ms == app.cfg.animation_ms)
 
+
+    print("== post-game analysis (PART 12/13) ==")
+    import analyzer as az
+    # scholar's-mate line: the only real blunder is 3...Nf6?? (allows mate)
+    scholars = ["e2e4", "e7e5", "d1h5", "b8c6", "f1c4", "g8f6", "h5f7"]
+    rep = az.analyze_game(
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", scholars,
+        eng_path, {"UseBook": "false", "Threads": 1, "Hash": 16}, nodes=12000)
+    check("report entries per ply", len(rep.entries) == 7)
+    klasses = [e["klass"] for e in rep.entries]
+    check("Nf6?? flagged the only blunder",
+          klasses == ["", "", "", "", "", "blunder", ""], str(klasses))
+    check("eval graph series present", len(rep.graph_w) == 7)
+    check("best moves + PVs recorded",
+          all(e["best"] for e in rep.entries) and rep.entries[5]["pv"],
+          str(rep.entries[5]["best"]))
+    check("summary text", "blunder" in rep.summary(), rep.summary())
+    # thresholds are configurable and actually honored
+    rep2 = az.analyze_game(
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", scholars[:4],
+        eng_path, {"UseBook": "false", "Threads": 1, "Hash": 16}, nodes=8000,
+        thresholds={"blunder": 40, "mistake": 30, "inaccuracy": 20})
+    check("custom thresholds reclassify",
+          sum(1 for e in rep2.entries if e["klass"]) >= 1,
+          str([e["klass"] for e in rep2.entries]))
+    # a drawish/cancelled path
+    import threading as _th
+    ev = _th.Event(); ev.set()
+    rep3 = az.analyze_game(
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", scholars[:2],
+        eng_path, {"UseBook": "false"}, nodes=4000, cancel=ev)
+    check("cancel returns None", rep3 is None)
+
+    # the screen + button states
+    app.show_frame("menu")
+    app.menu_analyze()
+    check("analysis frame shown", app._active_frame == "analysis")
+    st = dict(app.learn_btn._cfg)
+    check("learn button present", app.learn_btn is not None, str(st))
+
+    # learn-from-game writes a valid corpus line (PIPELINE format)
+    app.cfg.resume_game = None
+    app.mode = "human_vs_engine"; app.human_color = "w"
+    app.state.reset("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    for u in scholars:
+        app.state.push(app.state.board.parse_uci(u))
+    app.result = ("1-0", "checkmate")
+    os.makedirs("/tmp/veltrix_test_corpus", exist_ok=True)
+    _tp = "/tmp/veltrix_test_corpus/games.jsonl"
+    _tl = "/tmp/veltrix_test_corpus/log.md"
+    _lines0 = open(_tp).read().splitlines() if os.path.isfile(_tp) else []
+    app.learn_from_this_game(corpus_path=_tp, log_path=_tl)
+    ok_jsonl = True
+    try:
+        import json as _j
+        new_lines = open(_tp, encoding="utf-8").read().splitlines()[len(_lines0):]
+        rec = _j.loads(new_lines[-1])
+        ok_jsonl = (rec["source"] == "gui-learn-button" and
+                    rec["result"] == "1-0" and rec["plies"] == 7 and
+                    rec["moves"][2]["fen"].startswith("r"))
+    except Exception as exc:
+        ok_jsonl = False
+        print("   jsonl trouble:", exc)
+    check("learn-button corpus line", ok_jsonl)
+    app.result = None
+    app.state.reset()
+
     print("== navigation ==")
     app.new_game(side="w", keep_setup=True)
     app.mode = "human_vs_human"; app.engine_thinking = False

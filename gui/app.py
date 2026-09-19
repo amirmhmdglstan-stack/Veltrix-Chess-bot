@@ -8,6 +8,7 @@ engine process - the GUI never evaluates or searches positions itself.
 from __future__ import annotations
 
 import os
+import time
 import random
 import sys
 import tkinter as tk
@@ -27,6 +28,8 @@ from game_state import GameState                                             # n
 import models                                                                # noqa: E402
 import ext_engines                                                           # noqa: E402
 import sounds                                                                # noqa: E402
+import threading                                                             # noqa: E402
+import analyzer                                                              # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = "Veltrix 1.0"
@@ -84,11 +87,14 @@ class VeltrixApp:
         self._connect_engine()
 
         self.TIME_CONTROLS = PRESET_TIME_CONTROLS
+        self.analysis = {"report": None, "running": False,
+                         "cancel": threading.Event(), "worker": None}
         # ---------------- UI ----------------
         self._build_menu()          # native menubar (fallback & shortcuts)
         self._build_layout()        # the game screen (frame)
         self._build_menu_screen()   # the main menu (frame)
         self._build_config_screen() # the new-game configuration (frame)
+        self._build_analysis_screen() # post-game analysis (frame, PART 12)
         self.apply_cfg_visual()
         self.new_game(keep_setup=True, silent=True)
         self.show_frame("menu")
@@ -359,7 +365,8 @@ class VeltrixApp:
         """Top-level navigation between Menu / Config / Game screens."""
         for frame in (getattr(self, "menu_frame", None),
                       getattr(self, "config_frame", None),
-                      getattr(self, "game_frame", None)):
+                      getattr(self, "game_frame", None),
+                      getattr(self, "analysis_frame", None)):
             if frame is not None:
                 frame.pack_forget()
         if name == "menu":
@@ -367,6 +374,8 @@ class VeltrixApp:
             self.menu_frame.pack(fill=tk.BOTH, expand=True)
         elif name == "config":
             self.config_frame.pack(fill=tk.BOTH, expand=True)
+        elif name == "analysis":
+            self.analysis_frame.pack(fill=tk.BOTH, expand=True)
         else:
             self.game_frame.pack(fill=tk.BOTH, expand=True)
         self._active_frame = name
@@ -504,9 +513,8 @@ class VeltrixApp:
             self.status("no game to analyze yet - play or load one first")
             self.show_frame("game")
             return
-        self.show_frame("game")
-        if not self.analyzing:
-            self.toggle_analysis()
+        self._analysis_refresh_info()
+        self.show_frame("analysis")
 
     # -------------------------------------------------- resume (PART 5)
     def save_resume_state(self):
@@ -891,6 +899,279 @@ class VeltrixApp:
                  "engine itself.\n\n" + detail,
                  justify="left", wraplength=380, padx=14, pady=12).pack()
         tk.Button(mb, text="OK", command=mb.destroy).pack(pady=6)
+
+    # ============================================== post-game analysis
+    def _build_analysis_screen(self):
+        """PART-12/13 analysis screen: whole-game engine review."""
+        f = ttk.Frame(self.root, padding=14)
+        self.analysis_frame = f
+        top = ttk.Frame(f)
+        top.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(top, text="Game Analysis", font=("TkDefaultFont", 17, "bold")
+                  ).pack(side=tk.LEFT)
+        ttk.Button(top, text="Back to game",
+                   command=lambda: self.show_frame("game")).pack(side=tk.RIGHT)
+        bar = ttk.Frame(f)
+        bar.pack(fill=tk.X, pady=4)
+        ttk.Label(bar, text="Analyser:").pack(side=tk.LEFT)
+        self.analysis_engine_var = tk.StringVar()
+        self.analysis_engine_cb = ttk.Combobox(
+            bar, textvariable=self.analysis_engine_var, state="readonly",
+            width=20, values=self._analyser_choices())
+        self.analysis_engine_cb.pack(side=tk.LEFT, padx=4)
+        self.analysis_engine_var.set("zel")
+        ttk.Label(bar, text="nodes/position:").pack(side=tk.LEFT, padx=(8, 0))
+        self.analysis_nodes_var = tk.StringVar(value=str(self.cfg.analysis_nodes))
+        ttk.Entry(bar, textvariable=self.analysis_nodes_var, width=9).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="Thresholds\u2026",
+                   command=self.dialog_thresholds).pack(side=tk.LEFT, padx=6)
+        self.analysis_start_btn = ttk.Button(bar, text="Analyze game",
+                                             command=self.analysis_start)
+        self.analysis_start_btn.pack(side=tk.LEFT, padx=6)
+        self.analysis_cancel_btn = ttk.Button(bar, text="Cancel",
+                                              command=self.analysis_cancel,
+                                              state="disabled")
+        self.analysis_cancel_btn.pack(side=tk.LEFT)
+
+        self.analysis_prog = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.analysis_prog).pack(anchor="w")
+        mid = ttk.Frame(f)
+        mid.pack(fill=tk.BOTH, expand=True, pady=6)
+        left = ttk.Frame(mid)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.analysis_list = tk.Text(left, width=46, height=20, state="disabled",
+                                     font=("TkFixedFont", 9), wrap="none")
+        self.analysis_list.pack(fill=tk.BOTH, expand=True)
+        right = ttk.Frame(mid, padding=(10, 0))
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.analysis_graph = tk.Canvas(right, width=180, height=150,
+                                        background="#1b222b",
+                                        highlightthickness=0)
+        self.analysis_graph.pack(fill=tk.X)
+        self.analysis_crit = tk.Text(right, width=26, height=8, state="disabled",
+                                     wrap="word", font=("TkDefaultFont", 9))
+        self.analysis_crit.pack(fill=tk.X, pady=6)
+        self.learn_btn = ttk.Button(
+            right, text="Learn From This Game", state="disabled",
+            command=self.learn_from_this_game)
+        self.learn_btn.pack(fill=tk.X)
+        self.learn_note = tk.Label(right, text="", fg="#7a8a96",
+                                   justify="left", wraplength=180,
+                                   font=("TkDefaultFont", 8))
+        self.learn_note.pack(anchor="w", pady=(4, 0))
+
+    def _analyser_choices(self):
+        vals = ["Veltrix"]
+        vals += ["engine:" + e.name for e in self.registry.list() if e.enabled]
+        return vals
+
+    def _analysis_refresh_info(self):
+        self.analysis_engine_cb.configure(values=self._analyser_choices())
+        if self.analysis_engine_var.get() not in self._analyser_choices():
+            self.analysis_engine_var.set("Veltrix")
+        n = len(self.state.hist_uci())
+        decisive = bool(self.result and self.result[0] in ("1-0", "0-1"))
+        engine_lost = (decisive and self.mode == "human_vs_engine"
+                       and ((self.result[0] == "1-0") == (self.human_color == "w")))
+        can_learn = bool(n and decisive and not self.opponent_uses_external
+                         and engine_lost)
+        self.learn_btn.configure(state=("normal" if can_learn else "disabled"))
+        self.learn_note.configure(text=(
+            "Veltrix lost this game - it can be folded into its training"
+            " corpus." if can_learn else
+            "available after a decisive Veltrix loss"))
+        self.analysis_prog.set(f"{n} plies ready. Choose an analyser and run.")
+
+    def dialog_thresholds(self):
+        mb = tk.Toplevel(self.root)
+        mb.title("Classification thresholds (cp)")
+        vars_ = {}
+        for i, (k, lab) in enumerate((("analysis_inaccuracy_cp", "inaccuracy"),
+                                      ("analysis_mistake_cp", "mistake"),
+                                      ("analysis_blunder_cp", "blunder"))):
+            tk.Label(mb, text=lab + " ≥").grid(row=i, column=0, sticky="w",
+                                                   padx=8, pady=4)
+            v = tk.StringVar(value=str(getattr(self.cfg, k)))
+            tk.Entry(mb, textvariable=v, width=8).grid(row=i, column=1)
+            vars_[k] = v
+
+        def _save():
+            try:
+                self.cfg.analysis_inaccuracy_cp = max(20, int(vars_["analysis_inaccuracy_cp"].get()))
+                self.cfg.analysis_mistake_cp = max(self.cfg.analysis_inaccuracy_cp,
+                                                   int(vars_["analysis_mistake_cp"].get()))
+                self.cfg.analysis_blunder_cp = max(self.cfg.analysis_mistake_cp,
+                                                   int(vars_["analysis_blunder_cp"].get()))
+                self.cfg.save()
+            except ValueError:
+                self.status("thresholds must be integers")
+            mb.destroy()
+        tk.Button(mb, text="OK", command=_save).grid(row=3, column=0, pady=8)
+        tk.Button(mb, text="Cancel", command=mb.destroy).grid(row=3, column=1)
+
+    def analysis_start(self):
+        if self.analysis["running"]:
+            return
+        if not self.state.hist_uci():
+            return
+        try:
+            nodes = max(4000, int(self.analysis_nodes_var.get()))
+        except ValueError:
+            nodes = self.cfg.analysis_nodes
+        self.cfg.analysis_nodes = nodes
+        choice = self.analysis_engine_var.get()
+        if choice.startswith("engine:"):
+            ent = {e.name: e for e in self.registry.list()}.get(choice[len("engine:"):])
+            if not ent:
+                self.status("chosen external engine not available")
+                return
+            path, opts = ent.path, dict(ent.options or {})
+        else:
+            path, opts = self.engine_path, {"UseBook": "false", "Threads": 2,
+                                            "Hash": 128}
+        self.analysis["running"] = True
+        self.analysis["cancel"] = threading.Event()
+        self.analysis_start_btn.configure(state="disabled")
+        self.analysis_cancel_btn.configure(state="normal")
+        moves = self.state.hist_uci()
+        fen0 = self.initial_fen
+        thr = {"blunder": self.cfg.analysis_blunder_cp,
+               "mistake": self.cfg.analysis_mistake_cp,
+               "inaccuracy": self.cfg.analysis_inaccuracy_cp}
+
+        def _work():
+            rep = analyzer.analyze_game(
+                fen0, moves, path, engine_options=opts, nodes=nodes,
+                thresholds=thr,
+                progress_cb=lambda d, t: self.root.after(
+                    0, lambda: self.analysis_prog.set(f"analyzing {d}/{t}")),
+                cancel=self.analysis["cancel"])
+            self.root.after(0, lambda: self._analysis_done(rep))
+
+        self.analysis["worker"] = threading.Thread(target=_work, daemon=True)
+        self.analysis["worker"].start()
+
+    def analysis_cancel(self):
+        self.analysis["cancel"].set()
+
+    def _analysis_done(self, rep):
+        self.analysis["running"] = False
+        self.analysis_start_btn.configure(state="normal")
+        self.analysis_cancel_btn.configure(state="disabled")
+        if rep is None:
+            self.analysis_prog.set("analysis cancelled")
+            return
+        self.analysis["report"] = rep
+        # fill the move list
+        self.analysis_list.configure(state="normal")
+        self.analysis_list.delete("1.0", tk.END)
+        for e in rep.entries:
+            glyph = analyzer.KLASS_GLYPH.get(e["klass"], "")
+            ev = "" if e["ev_w"] is None else f"{e['ev_w'] / 100:+.2f}"
+            best = f"  best: {e['best']}" if glyph or e["loss"] else ""
+            pv = f" [{' '.join(e['pv'][:4])}\u2026]" if glyph else ""
+            self.analysis_list.insert(
+                tk.END, f"{e['no']:6s} {e['san']:8s}{glyph:2s} {ev:>7s}"
+                        f"{(' -' + str(e['loss']) + 'cp') if e['loss'] else ''}"
+                        f"{best}{pv}\n")
+        self.analysis_list.configure(state="disabled")
+        # critical moments
+        self.analysis_crit.configure(state="normal")
+        self.analysis_crit.delete("1.0", tk.END)
+        self.analysis_crit.insert(
+            tk.END, rep.summary() + "\n\n"
+            + "\n".join(f"{e['no']} {e['san']} {analyzer.KLASS_GLYPH[e['klass']]}"
+                        f"  ({e['klass']}, -{e['loss']} cp; best {e['best']})"
+                        for e in rep.critical))
+        self.analysis_crit.configure(state="disabled")
+        self._draw_eval_graph(rep)
+        self.analysis_prog.set(rep.summary())
+
+    def _draw_eval_graph(self, rep):
+        c = self.analysis_graph
+        c.delete("all")
+        vals = rep.graph_w
+        if len(vals) < 2:
+            return
+        w = int(c.cget("width")); h = int(c.cget("height"))
+        pad = 6
+        c.create_line(pad, h // 2, w - pad, h // 2, fill="#3a4653")
+        sc = (h - 2 * pad) / (2 * 1600.0)
+        n = len(vals)
+        pts = []
+        for i, v in enumerate(vals):
+            x = pad + (w - 2 * pad) * i / (n - 1)
+            y = h // 2 - max(-1600, min(1600, v)) * sc
+            pts.append((x, y))
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            c.create_line(x0, y0, x1, y1, fill="#e8b64c", width=1.5)
+        for e in rep.critical:
+            i = e["ply"] - 1
+            x, y = pts[i]
+            c.create_oval(x - 2, y - 2, x + 2, y + 2, fill="#d44", outline="")
+        midh = h // 2
+        c.create_text(pad, midh - 8, text="+", anchor="sw", fill="#7a8a96")
+        c.create_text(pad, midh + 8, text="-", anchor="nw", fill="#7a8a96")
+
+    # -------------------------------------------- learn-from-this-game
+    def learn_from_this_game(self, corpus_path=None, log_path=None):
+        """PART 13: fold a decisive Veltrix loss into the learning corpus.
+
+        Honest by construction: writes a record in the same JSONL format the
+        learning loop's selfplay produces (data/learn/games.jsonl, eval fields
+        null - teacher analysis fills them later) plus a short note. Nothing
+        here claims the engine will get stronger; promotion is the gates
+        problem (tools/learn/promote.py).
+        """
+        import json as _json
+        corpus_path = corpus_path or "data/learn/games.jsonl"
+        log_path = log_path or "data/learn/gui_imports_log.md"
+        os.makedirs(os.path.dirname(corpus_path) or ".", exist_ok=True)
+        if os.path.dirname(log_path):
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        moves = self.state.hist_uci()
+        sans = self.state.hist_sans()
+        from chesslib import Board as _B
+        b = _B(self.initial_fen)
+        plies = []
+        for i, (u, s) in enumerate(zip(moves, sans)):
+            plies.append({"fen": b.fen(), "move": u, "stm": b.stm,
+                          "san": s, "eval": None, "depth": None,
+                          "seldepth": None, "nodes": None, "ms": None,
+                          "clock_ms": None, "pv0": ""})
+            b.push(b.parse_uci(u))
+        title = ("human" if self.mode == "human_vs_engine" else "way") + "@" + \
+            self.opponent_name()
+        rec = {
+            "game": f"gui-{time.strftime('%Y%m%d-%H%M%S')}",
+            "source": "gui-learn-button",
+            "white": ("Player" if self.human_color == "w" else title),
+            "black": ("Veltrix" if self.human_color == "w" else
+                      ("Player" if self.mode == "human_vs_human" else "Veltrix")),
+            "result": self.result[0] if self.result else "*",
+            "reason": self.result[1] if self.result else "",
+            "plies": len(plies),
+            "tc": str(self.cfg.time_control[0]),
+            "opening": self.initial_fen,
+            "engine": {"w": {"name": "TBD", "path": ""},
+                       "b": {"name": "TBD", "path": ""}},
+            "moves": plies,
+            "note": "submitted via the GUI Learn From This Game button",
+        }
+        with open(corpus_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n## {rec['game']} - {rec['result']} ({rec['reason']}), "
+                    f"{len(plies)} plies, opponent={title}\n"
+                    f"imported via Learn From This Game; will be considered by "
+                    f"the next training cycle of tools/learn/learn_loop.py; "
+                    f"promotion remains subject to the champion gates.\n")
+        self.status("game added to the learning corpus (data/learn/games.jsonl)")
+        self.learn_btn.configure(state="disabled")
+        self.learn_note.configure(
+            text="recorded in data/learn/games.jsonl. The next training cycle "
+                 "will consider it; no strength promise until the gates pass.")
 
     def menu_button(self):
         self.save_resume_state()
