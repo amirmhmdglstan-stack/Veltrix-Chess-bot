@@ -128,11 +128,101 @@ def main():
               str(app.sans))
     print("    game:", " ".join(app.sans))
 
+    print("== undo/redo mechanics (PART 8 regression) ==")
+    # ---------------- A. pure state mechanics, no engine interference --
+    app.result = None
+    app.mode = "human_vs_engine"
+    app.new_game(side="w", keep_setup=True)
+    app.mode = "human_vs_human"
+    app.engine_thinking = False
+    pump(0.3)
+    def play(sq1, sq2):
+        app.on_square_click(parse_sq(sq1))
+        app.on_square_click(parse_sq(sq2))
+    for a, b in (("e2", "e4"), ("e7", "e5"), ("g1", "f3"), ("b8", "c6")):
+        play(a, b)
+    check("scripted 4 plies", app.sans == ["e4", "e5", "Nf3", "Nc6"], str(app.sans))
+
+    # single undo mutates the REAL game state, not just a view cursor
+    app.undo_plies(1)
+    check("undo shrinks real move list", app.sans == ["e4", "e5", "Nf3"], str(app.sans))
+    check("undo puts cursor at live end", app.view == len(app.moves))
+    check("undo restores position", "Nc6" not in app.board.san(app.board.legal_moves()[0])
+          and app.board.fen().split()[1] == "b", app.board.fen())
+
+    # multiple undos (alternating sides)
+    app.undo_plies(2)
+    check("multiple undos", app.sans == ["e4"], str(app.sans))
+    check("pieces restored after undos",
+          app.board.fen() == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+          app.board.fen())
+
+    # redo restores full history
+    app.redo_plies(2)
+    check("redo restores plies", app.sans == ["e4", "e5", "Nf3"], str(app.sans))
+    # undo 1 ply of the engine-era rest + new move truncates abandoned future
+    app.undo_plies(1)
+    play("f1", "c4")     # Bc4 instead of Nf3; the old future must die
+    check("new move from rewound position truncates redo trail",
+          app.sans == ["e4", "e5", "Bc4"], str(app.sans))
+    n0 = len(app.moves)
+    app.redo_plies(1)
+    check("nothing to redo after truncation", len(app.moves) == n0, str(app.sans))
+
+    # undo clears game-over state
+    app.result = ("1/2-1/2", "test-result")
+    app.undo_plies(1)
+    check("undo clears result", app.result is None, str(app.result))
+    app.result = None
+    app.redo_plies(1)
+    # undo-all & redo-all round trip over the full trail
+    total = len(app.state.moves)
+    app.undo_all_plies()
+    check("undo-all reaches initial position", app.view == 0 and len(app.moves) == 0)
+    app.redo_all_plies()
+    check("redo-all restores game", len(app.moves) == total, str(app.sans))
+
+    # -------- B. engine orchestration: cancel, stale bestmoves, re-arm --
+    print("== undo vs engine (PART 8 regression) ==")
+    app.mode = "human_vs_engine"
+    app.human_color = "w"
+    app.new_game(side="w", keep_setup=True)
+    pump(0.3)
+    play("e2", "e4")
+    check("engine search started after e4", app.engine_thinking)
+    # THE ORIGINAL BUG: previous action while engine is thinking must cancel
+    # the search and the late bestmove must land nowhere
+    app.undo_plies(1)
+    check("undo cancels in-flight search", not app.engine_thinking)
+    check("game state really rewound", len(app.moves) == 0 and not app.sans, str(app.sans))
+    pump(2.0)   # well beyond the cancelled search's deadline
+    check("stale bestmove discarded", len(app.moves) == 0 and not app.sans, str(app.sans))
+
+    # engine re-arms from the position reached via takeback
+    play("d2", "d4")
+    t0 = time.time()
+    while len(app.moves) < 2 and time.time() - t0 < 12:
+        pump(0.2)
+    check("engine replies from post-undo position",
+          len(app.moves) == 2 and app.sans[0] == "d4", str(app.sans))
+
+    # takeback where the BOT was about to move -> engine re-thinks there
+    app.undo_plies(1)    # remove engine's reply; black (engine) to move again
+    check("bot-turn takeback rewound", len(app.moves) == 1, str(app.sans))
+    t0 = time.time()
+    while len(app.moves) < 2 and time.time() - t0 < 12:
+        pump(0.2)
+    check("engine re-arms on its own undone turn",
+          len(app.moves) == 2 and app.moves[-1].uci()[:2] != "d4", str(app.sans))
+
+    # ---------------- C. jump-style navigation on real state ----------
     print("== navigation ==")
+    app.mode = "human_vs_human"  # avoid engine re-arm noise for pure cursor checks
     app.navigate(0)
-    check("navigate to start", app.view == 0)
+    check("navigate to start", app.view == 0 and len(app.state.moves) > 0)
     app.navigate(len(app.moves))
     check("navigate back to live", app.view == len(app.moves))
+    app.mode = "human_vs_engine"
 
     print("== FEN copy/paste ==")
     app.copy_fen()
@@ -150,7 +240,9 @@ def main():
 
     print("== PGN save/load ==")
     tk_stub.STUB_DIALOG_ANSWERS["saveas"] = "/tmp/veltrix_gui_test.pgn"
-    app.sans = ["e4", "e5", "Nf3", "Nc6"]
+    ok, msg = app._import_pgn("1. e4 e5 2. Nf3 Nc6 *\n")
+    check("PGN text import works", ok and app.sans == ["e4", "e5", "Nf3", "Nc6"],
+          f"{ok} {msg} {app.sans}")
     app.save_pgn()
     check("PGN written", os.path.isfile("/tmp/veltrix_gui_test.pgn"))
     tk_stub.STUB_DIALOG_ANSWERS["open"] = "/tmp/veltrix_gui_test.pgn"

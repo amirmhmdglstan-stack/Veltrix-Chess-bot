@@ -23,6 +23,7 @@ from dialogs import PromotionDialog, TimeControlDialog, ColorsDialog, \
     EngineSettingsDialog                                                    # noqa: E402
 from board_widget import BoardCanvas, UNICODE_PIECES                         # noqa: E402
 from theme import THEMES                                                     # noqa: E402
+from game_state import GameState                                             # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = "Veltrix 1.0"
@@ -47,13 +48,10 @@ class VeltrixApp:
         except tk.TclError:
             pass
 
-        # ---------------- model ----------------
+        # ---------------- model (single authoritative state) ----------------
         self.initial_fen = STARTPOS_FEN
-        self.board = Board()            # live board (at live play length)
-        self.moves: list[Move] = []     # moves from initial position
-        self.sans: list[str] = []
-        self.view = 0                   # how many moves are currently displayed
-        self.result = None              # (result, reason) or None
+        self.state = GameState(STARTPOS_FEN)
+        self._go_serial: dict = {}      # engine client -> state serial at 'go'
         self.mode = "human_vs_engine"   # or "engine_vs_engine" / "human_vs_human"
         self.human_color = "w"
         self.engine_thinking = False
@@ -79,6 +77,41 @@ class VeltrixApp:
         self.new_game(keep_setup=True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._tick()
+
+    # ---------------- state delegations (single source of truth lives in
+    # self.state; these exist so the rest of the app/tests stay readable)
+    @property
+    def board(self) -> Board:
+        return self.state.board
+
+    @property
+    def moves(self) -> list:
+        # live game only - the abandoned redo trail is GameState's business
+        return self.state.hist_moves()
+
+    @property
+    def sans(self) -> list:
+        return self.state.hist_sans()
+
+    @sans.setter
+    def sans(self, v):
+        self.state.set_live_sans(v)
+
+    @property
+    def view(self) -> int:
+        return self.state.cursor
+
+    @view.setter
+    def view(self, v: int):
+        self.state.cursor = v
+
+    @property
+    def result(self):
+        return self.state.result
+
+    @result.setter
+    def result(self, v):
+        self.state.result = v
 
     # ============================================================ engine
     def _connect_engine(self):
@@ -281,11 +314,10 @@ class VeltrixApp:
     def new_game(self, side="w", keep_setup=False):
         if not keep_setup:
             self.initial_fen = self.current_fen_base()
-        # reset state
-        self.board = Board(self.initial_fen)
-        self.moves, self.sans = [], []
-        self.view = 0
-        self.result = None
+        # reset state (single authoritative object)
+        self.cancel_engine_search()
+        self.state.reset(self.initial_fen)
+        self._go_serial.clear()
         self.human_color = side
         (wb, wi), (bb, bi) = self.current_tc_seconds()
         self.clocks = {"w": wb if wb is not None else float("inf"),
@@ -361,15 +393,61 @@ class VeltrixApp:
 
     # ============================================================ play flow
     def live_board(self) -> Board:
-        return self.board
+        return self.state.board
 
     def view_board(self) -> Board:
-        if self.view == len(self.moves):
-            return self.board
-        nb = Board(self.initial_fen)
-        for m in self.moves[:self.view]:
-            nb.push(m)
-        return nb
+        return self.state.board
+
+    def cancel_engine_search(self, note=None):
+        """Abort any in-flight search and make sure late bestmoves are
+        discarded (the go-serial check handles that). Must run BEFORE any
+        undo/redo/goto/new-game state change."""
+        for c in (self.engine, self.engine2):
+            if c and c.alive:
+                self._go_serial.pop(c, None)
+                c.stop()
+        if self.engine_thinking:
+            self.engine_thinking = False
+            if note:
+                self.status(note)
+
+    def on_state_changed(self, redraw=True):
+        """Unified resync after GameState mutations."""
+        if redraw:
+            self._sync_board_widget()
+        self.move_list_update()
+
+    def undo_plies(self, n=1):
+        """PART 8 semantics: take back n plies from the REAL game state -
+        engine search cancelled, position/history/eval recomputed, and if
+        the restored position is the engine's turn it plays from HERE."""
+        if self.analyzing:
+            self.toggle_analysis()
+        if not self.state.undo_available:
+            return
+        self.cancel_engine_search()
+        self.state.undo(n)
+        self.on_state_changed()
+        self.status("takeback - position rewound"
+                    + ("; it is the engine's turn" if self.side_is_engine(self.board.stm)
+                       and self.mode == "human_vs_engine" else ""))
+        self.maybe_engine_move()
+
+    def undo_all_plies(self):
+        self.undo_plies(self.state.cursor)
+
+    def redo_plies(self, n=1):
+        if self.analyzing:
+            self.toggle_analysis()
+        if not self.state.redo_available:
+            return
+        self.cancel_engine_search()
+        self.state.redo(n)
+        self.on_state_changed()
+        self.maybe_engine_move()
+
+    def redo_all_plies(self):
+        self.redo_plies(self.state.redo_count)
 
     def _sync_board_widget(self, animate=None):
         vb = self.view_board()
@@ -412,8 +490,6 @@ class VeltrixApp:
         if self.result or self.mode == "engine_vs_engine":
             return
         vb = self.view_board()
-        if self.view != len(self.moves):
-            return
         if self.mode == "human_vs_engine" and vb.stm != self.human_color:
             return
         # selecting
@@ -447,12 +523,11 @@ class VeltrixApp:
         self.play_move(m, mover="human")
 
     def play_move(self, m: Move, mover="human"):
-        moved_color = self.board.stm
-        san = self.board.san(m)
-        self.board.push(m)
-        self.moves.append(m)
-        self.sans.append(san)
-        self.view = len(self.moves)
+        moved_color = self.state.board.stm
+        if not self.state.at_end:
+            # playing from a rewound position: engine "future" is abandoned
+            self._go_serial.clear()
+        san = self.state.push(m)
         # apply increment to the side that just moved
         if self.clocks[moved_color] != float("inf"):
             self.clocks[moved_color] += self.incs[moved_color]
@@ -472,7 +547,8 @@ class VeltrixApp:
         if client is None or not client.alive:
             return
         client.set_position("startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen,
-                            [m.uci() for m in self.moves])
+                            self.state.hist_uci())
+        self._go_serial[client] = self.state.serial
         if "inf" in str(self.clocks[stm]) or self.clocks[stm] == float("inf"):
             client.go(movetime=self.cfg.move_time_ms)
         else:
@@ -482,10 +558,15 @@ class VeltrixApp:
         self.status(f"engine thinking as {'white' if stm == 'w' else 'black'}…")
 
     def on_engine_bestmove(self, client, data):
-        # ignore stale bestmoves when not expecting one from this client
-        stm = self.board.stm
-        expected = self.engine if (self.mode == "human_vs_engine" or stm == "w") else self.engine2
-        if client is not expected and self.mode == "engine_vs_engine":
+        expect_serial = self._go_serial.pop(client, None)
+        # any bestmove that does not belong to a go issued for the CURRENT
+        # state is stale (e.g. undo pressed while thinking): discard it and
+        # re-arm the engine from the present position if it its turn
+        if expect_serial is None or expect_serial != self.state.serial:
+            self.engine_thinking = False
+            if not self.result and not self.analyzing and self.board and \
+                    self.side_is_engine(self.board.stm) and self.mode != "human_vs_human":
+                self.maybe_engine_move()
             return
         self.engine_thinking = False
         if self.result or self.analyzing:
@@ -626,22 +707,19 @@ class VeltrixApp:
 
     # ============================================================ navigation
     def navigate(self, idx):
-        idx = max(0, min(idx, len(self.moves)))
+        idx = max(0, min(idx, len(self.state.moves)))
         if idx == self.view:
             return
-        nb = Board(self.initial_fen)
-        for m in self.moves[:idx]:
-            nb.push(m)
-        self.view = idx
-        vb = nb
-        last = None
-        if idx > 0:
-            m = self.moves[idx - 1]
-            last = (m.frm, m.to)
-        check_sq = vb.king_sq(vb.stm) if vb.in_check(vb.stm) else None
-        self.canvas.set_position(vb, last_move=last, check_sq=check_sq)
-        self.status("viewing history - click ▶▶ to return to live"
-                    if idx != len(self.moves) else "live position")
+        if self.analyzing:
+            self.toggle_analysis()
+        self.cancel_engine_search()
+        self.state.goto(idx)
+        vb = self.state.board
+        self._sync_board_widget()
+        remainder = len(self.moves) - idx
+        self.status("browsing history - ▶ to redo; any move continues from here"
+                    if remainder else "live position")
+        self.maybe_engine_move()
 
     def on_moves_click(self, ev):
         index = self.moves_list.index(f"@{ev.x},{ev.y}")
@@ -750,11 +828,7 @@ class VeltrixApp:
             moves.append(found)
         self.initial_fen = fen
         self.new_game(side=self.human_color)
-        for mv, s in zip(moves, sans):
-            self.board.push(mv)
-            self.moves.append(mv)
-            self.sans.append(s)
-        self.view = len(self.moves)
+        self.state.load_moves(moves, sans)
         self._sync_board_widget()
         return True, f"loaded {len(moves)} moves from PGN"
 
@@ -840,10 +914,9 @@ class VeltrixApp:
             return
         self.analyzing = not self.analyzing
         if self.analyzing:
-            vb = self.view_board()
-            mv_hist = [m.uci() for m in self.moves[:self.view]]
             self.engine.set_position(
-                "startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen, mv_hist)
+                "startpos" if self.initial_fen == STARTPOS_FEN else self.initial_fen,
+                self.state.hist_uci())
             self.engine.go(infinite=True)
             self.status("analysis mode on - engine thinking until toggled off")
         else:

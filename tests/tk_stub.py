@@ -151,6 +151,7 @@ class Canvas(Widget):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
         self._items = {}
+        self._pos = {}
 
     def create_rectangle(self, *a, **kw): return self._mk(**kw)
     def create_oval(self, *a, **kw): return self._mk(**kw)
@@ -163,7 +164,22 @@ class Canvas(Widget):
         return i
 
     def delete(self, tag): pass
-    def coords(self, item, *xy): pass
+
+    def coords(self, item, *xy):
+        # real tk returns the item coords; keep a tiny per-item position so
+        # animation math in board_widget can run headless
+        if not xy:
+            return self._pos.setdefault(item, [0.0, 0.0, 0.0, 0.0])
+        cur = self._pos.setdefault(item, [0.0, 0.0, 0.0, 0.0])
+        for i, v in enumerate(xy[:4]):
+            cur[i] = float(v)
+        return None
+
+    def move(self, item, dx, dy):
+        p = self._pos.setdefault(item, [0.0, 0.0, 0.0, 0.0])
+        p[0] += dx
+        p[1] += dy
+
     def tag_raise(self, item): pass
     def itemconfigure(self, item, **kw): self._items.setdefault(item, {}).update(kw)
 
