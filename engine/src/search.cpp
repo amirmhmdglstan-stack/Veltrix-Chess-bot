@@ -149,10 +149,18 @@ struct TimeMan {
 
 TimeMan gTime;
 
+// checking interval: 2048 normally, but small `go nodes` limits must still be
+// honored (a 2048-granularity check would never notice a limit of e.g. 500
+// nodes and the search would run to max depth instead)
+inline U64 node_block() {
+    return (gTime.maxNodes && gTime.maxNodes < 4096) ? 64 : 2048;
+}
+
 inline void bump_nodes_and_check(SearchThread& th) {
     th.nodes++;
-    if ((th.nodes & 2047) == 0) {
-        gTotalNodes.fetch_add(2048 + (th.nodes & 2047) * 0, std::memory_order_relaxed);
+    const U64 block = node_block();
+    if ((th.nodes & (block - 1)) == 0) {
+        gTotalNodes.fetch_add(block, std::memory_order_relaxed);
         if (gTime.hardMs >= 0 && !gTime.ponderMode && gTime.elapsed() >= gTime.hardMs)
             gStop = true;
         if (gTime.maxNodes && gTotalNodes.load(std::memory_order_relaxed) >= gTime.maxNodes)
@@ -161,7 +169,7 @@ inline void bump_nodes_and_check(SearchThread& th) {
 }
 inline bool stopped() { return gStop.load(std::memory_order_relaxed); }
 inline void flush_nodes(SearchThread& th) {
-    U64 rem = th.nodes & 2047;
+    U64 rem = th.nodes & (node_block() - 1);
     if (rem) gTotalNodes.fetch_add(rem, std::memory_order_relaxed);
 }
 
@@ -686,7 +694,7 @@ Value root_search(SearchThread& th, int depth, Value alpha, Value beta, int pvId
 // print UCI info for completed iteration `depth` (main thread only)
 void print_info(SearchThread& th, int depth, int multiPVCount) {
     const long t = std::max(1L, gTime.elapsed());
-    const U64 nodes = gTotalNodes.load(std::memory_order_relaxed) + (th.nodes & 2047);
+    const U64 nodes = gTotalNodes.load(std::memory_order_relaxed) + (th.nodes & (node_block() - 1));
     const U64 nps = nodes * 1000 / U64(t);
     const int hf = hashfull();
     for (int k = 0; k < multiPVCount && k < int(th.rootMoves.size()); ++k) {

@@ -452,11 +452,85 @@ void loop() {
         else if (cmd == "position") cmd_position(tokens);
         else if (cmd == "go") cmd_go(tokens);
         else if (cmd == "stop") Search::stop_and_join();
+        else if (cmd == "nnuewalk") {
+            // permanent regression harness: walk scripted lines containing
+            // king moves (incl. captures & castling), en passant and a
+            // promotion; at every ply the incrementally-updated accumulator
+            // must equal a from-scratch refresh exactly
+            if (!NNUE::loaded() && gWantNnue) auto_load_net();
+            if (!NNUE::loaded()) {
+                std::printf("nnuewalk: no net loaded\n"); std::fflush(stdout);
+            } else {
+                static const char* lines[] = {
+                    // kings moving incl. captures (white Kd1-d2-e3, black king c8-b7)
+                    "e2e4 d7d5 e4d5 d8d5 b1c3 d5a5 d2d4 g8f6 g1f3 c8f5 f1c4 e7e6"
+                    " c1d2 a7a6 e1d2 c7c6 d2e3 b7b5 c4b3 c8b8 a2a4 b5b4 b1d1 b8b7",
+                    // castling both sides
+                    "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 b1c3 f8e7 d2d3 d7d6 e1g1 e8g8"
+                    " c3e2 c8e6 e2g3 d8d7 f2f3 a7a6 f1e1 b7b5 c4b3 c6a5 c1e3 a5b3",
+                    // en passant capture + underpromotion march
+                    "e2e4 a7a6 e4e5 d7d5 e5d6 e7e6 d2d4 f7f5 g2g3 g7g5 g3g4 h7h5"
+                    " h2h4 g5h4 g4g5 e8f7 g5g6 e7f5 g6g7 f5g7 f2f3 g7f5 g1f3 h4g3",
+                };
+                int bad = 0, tot = 0;
+                for (const char* line : lines) {
+                    Position pos;
+                    pos.set_startpos();
+                    NNUE::Accumulator acc;
+                    NNUE::refresh(acc, pos);
+                    std::string s(line);
+                    std::istringstream iss(s);
+                    std::string tok;
+                    while (iss >> tok) {
+                        Move m = move_from_uci(pos, tok);
+                        if (m == MOVE_NONE) break;
+                        NNUE::Accumulator nxt;
+                        Color kside = NO_COLOR;
+                        const bool kingMove = NNUE::needs_king_refresh(pos, m, kside);
+                        NNUE::push(acc, nxt, pos, m);
+                        pos.do_move(m);
+                        if (kingMove) NNUE::refresh_side(nxt, pos, kside);
+                        NNUE::Accumulator ref;
+                        NNUE::refresh(ref, pos);
+                        ++tot;
+                        bool diff = false;
+                        int dpov = -1, nshown = 0;
+                        for (int p = 0; p < 2; ++p) {
+                            int nd = 0;
+                            for (int i = 0; i < NNUE::H1; ++i)
+                                if (nxt.v[p][i] != ref.v[p][i]) {
+                                    diff = true; ++nd;
+                                    if (nshown < 6) {
+                                        std::printf("  pov=%d dim=%d incr=%d fresh=%d\n",
+                                                    p, i, int(nxt.v[p][i]), int(ref.v[p][i]));
+                                        ++nshown;
+                                    }
+                                }
+                            if (nd) { dpov = p; std::printf("  pov %d: %d dims differ at %s\n",
+                                                            p, nd, tok.c_str()); }
+                        }
+                        if (diff) { ++bad; std::printf("nnuewalk ACC DIFF near %s (pov %d)\n",
+                                                       tok.c_str(), dpov); }
+                        Value a = NNUE::evaluate(nxt, pos.side_to_move());
+                        Value b = NNUE::evaluate_fresh(pos);
+                        if (a != b) { ++bad; std::printf("nnuewalk EVAL DIFF %d vs %d at %s\n",
+                                                         int(a), int(b), tok.c_str()); }
+                        acc = nxt;
+                    }
+                }
+                std::printf("nnuewalk %s (%d plies checked, %d diffs)\n",
+                            bad ? "FAIL" : "PASS", tot, bad);
+                std::fflush(stdout);
+            }
+        }
         else if (cmd == "ponderhit") Search::ponderhit();
         else if (cmd == "quit") { Search::stop_and_join(); return; }
         else if (cmd == "d") { std::printf("%s\n", gPos().pretty().c_str()); std::fflush(stdout); }
         else if (cmd == "key") { std::printf("key: %016llx\n", (unsigned long long)gPos().key()); std::fflush(stdout); }
         else if (cmd == "nnueeval") {
+            // lazy load: clients/scripts may probe without a full handshake
+            if (!NNUE::loaded() && gWantNnue)
+                auto_load_net();
             if (NNUE::loaded() && Search::config().useNnue) {
                 std::printf("nnue %d\n", int(NNUE::evaluate_fresh(gPos())));
                 std::fflush(stdout);

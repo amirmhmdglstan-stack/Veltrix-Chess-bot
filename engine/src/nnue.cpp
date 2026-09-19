@@ -166,6 +166,12 @@ void push(const Accumulator& cur, Accumulator& next, const Position& pos, Move m
         } else {
             chgPc[n] = mover; chgFrom[n] = -1; chgTo[n] = to; ++n;
         }
+    } else {
+        // king move: HalfKA has NO king features (refresh_side skips kings
+        // too), so there is nothing to increment here. Our own perspective
+        // is rebuilt by the caller via refresh_side after do_move; the
+        // opponent perspective does not change (their king-relative view of
+        // our king does not exist in the feature set).
     }
     if (flag_of(m) == MF_ENPASSANT) {
         const int capSq = to + (us == WHITE ? -8 : 8);

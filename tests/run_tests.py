@@ -293,6 +293,47 @@ def main():
     lines = e.cmd("go depth 2", wait="bestmove", timeout=10)
     check("stalemate-ish position handled", any(l.startswith("bestmove") for l in lines), str(lines))
 
+    # small `go nodes N` limits must be honored (regression: the node check
+    # used to fire only every 2048 nodes, so tiny limits ran to max depth)
+    e.cmd("position startpos")
+    lines = e.cmd("go nodes 700", wait="bestmove", timeout=15)
+    check("tiny 'go nodes' returns bestmove", any(l.startswith("bestmove") and "0000" not in l
+                                                  for l in lines), str(lines[-3:]))
+    info = [l for l in lines if l.startswith("info depth")]
+    lastn = 0
+    for l in info:
+        t = l.split()
+        if "nodes" in t:
+            lastn = max(lastn, int(t[t.index("nodes") + 1]))
+    check("tiny 'go nodes' stays near budget", 0 < lastn < 4200, f"nodes seen: {lastn}")
+
+    # ------------------------------------------------------------ loss regression EPD
+    # auto-maintained by the learning loop (tools/learn/*): critical positions
+    # from past losses; the engine must not repeat the recorded best move miss
+    epd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loss_regression.epd")
+    if os.path.isfile(epd_path):
+        print("== loss-regression EPD ==")
+        tot = ok = 0
+        for line in open(epd_path, encoding="utf-8"):
+            line = line.strip()
+            if not line or " bm " not in line:
+                continue
+            fen, bm = line.split(" bm ")
+            bm = bm.rstrip(";").split()[0]
+            e.cmd(f"position fen {fen}")
+            got = None
+            lines = e.cmd("go depth 12", wait="bestmove", timeout=20)
+            for l in lines:
+                if l.startswith("bestmove"):
+                    got = l.split()[1]
+            tot += 1
+            ok += (got == bm)
+        # these positions come from REAL losses; the engine is expected to miss
+        # some of them until the loop improves it - floor is a warning band, not
+        # a hard gate yet, so the check only fails on catastrophic (<30%) drops
+        check("loss-regression EPD not catastrophic", tot == 0 or ok / tot >= 0.30,
+              f"solved {ok}/{tot} teacher-best moves")
+
     # ------------------------------------------------------------ stop & infinite
     print("== stop handling ==")
     e.cmd("ucinewgame")
