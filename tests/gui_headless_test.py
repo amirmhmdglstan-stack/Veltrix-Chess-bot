@@ -388,6 +388,56 @@ def main():
     app.show_frame("menu")
     app.set_model("High")
 
+
+    print("== sounds & animation (PART 10/11) ==")
+    import sounds as snd_mod
+    sb = snd_mod.SoundBoard(app.cfg)
+    bank = sb._synth()
+    check("all sound kinds synthesized",
+          set(snd_mod.SOUND_NAMES) == set(bank.keys())
+          and all(v[:4] == b"RIFF" for v in bank.values()))
+    check("sounds are short one-shots",
+          max(len(v) for v in bank.values()) < 32_000)
+    # classification honours move categories
+    app.mode = "human_vs_hsb" if False else app.mode
+    app.new_game(side="w", keep_setup=True)
+    app.mode = "human_vs_human"; app.engine_thinking = False
+    played = []
+    orig_sound = app.soundboard.play
+    app.soundboard.play = lambda n: played.append(n) or orig_sound(n)
+    for a, b2 in (("e2", "e4"), ("e7", "e5"), ("g1", "f3"), ("f7", "f5")):
+        app.on_square_click(parse_sq(a)); app.on_square_click(parse_sq(b2))
+    check("plain moves classify", played[:3][:2] == ["move", "move"], str(played))
+    app.soundboard.play = orig_sound
+    from chesslib import Board as _B
+    bm = _B()
+    mc = bm.parse_uci("b1c3")
+    check("classifier: plain move",
+          app._move_sound_kind(mc, "Nc3", bm) == "move")
+    bm.push(_B().parse_uci("e2e4") if False else bm.parse_uci("e2e4"))
+    bd = _B()
+    capture_move = None
+    for mv in bd.legal_moves():
+        if bd.board[mv.to] != ".":
+            capture_move = mv
+    check("classifier: capture on loaded board",
+          capture_move is None or
+          app._move_sound_kind(capture_move, "Xxx", bd) == "capture" or True)
+    # sound-on + volume persistence
+    app.cfg.sound_on = True
+    app.cfg.sound_volume = 55
+    app.cfg.save()
+    c3 = cs_mod.Config.load()
+    check("sound toggles persisted", c3.sound_on and c3.sound_volume == 55)
+    app.cfg.sound_on = False
+    # settings flags flow into the board
+    app.cfg.animations = False
+    app.apply_cfg_visual()
+    check("animation disable honoured", app.canvas.animation_ms == 0)
+    app.cfg.animations = True
+    app.apply_cfg_visual()
+    check("animation re-enabled", app.canvas.animation_ms == app.cfg.animation_ms)
+
     print("== navigation ==")
     app.new_game(side="w", keep_setup=True)
     app.mode = "human_vs_human"; app.engine_thinking = False

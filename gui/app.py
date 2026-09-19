@@ -26,6 +26,7 @@ from theme import THEMES                                                     # n
 from game_state import GameState                                             # noqa: E402
 import models                                                                # noqa: E402
 import ext_engines                                                           # noqa: E402
+import sounds                                                                # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = "Veltrix 1.0"
@@ -73,6 +74,7 @@ class VeltrixApp:
         self.model = models.profile(self.cfg.model
                                     if self.cfg.model in models.ALL else "High")
         self.registry = ext_engines.EngineRegistry(self.cfg)
+        self.soundboard = sounds.SoundBoard(self.cfg)
         try:
             ext_engines.detect_stockfish(self.cfg)   # optional, never fatal
         except Exception:
@@ -831,6 +833,7 @@ class VeltrixApp:
         self._sync_board_widget()
         self.move_list_update()
         if not silent:
+            self.soundboard.play("start")
             self.status(f"new game - you are {'White' if side == 'w' else 'Black'}")
         self.maybe_engine_move()
 
@@ -979,6 +982,7 @@ class VeltrixApp:
             return
         self.cancel_engine_search()
         self.state.undo(n)
+        self.soundboard.play("undo")
         self.on_state_changed()
         self.status("takeback - position rewound"
                     + ("; it is the engine's turn" if self.side_is_engine(self.board.stm)
@@ -1062,6 +1066,7 @@ class VeltrixApp:
                 targets = [m.to for m in vb.legal_moves() if m.frm == sq]
                 self.canvas.select(sq, targets)
             else:
+                self.soundboard.play("illegal")
                 self.canvas.deselect()
             return
         m = cand[0]
@@ -1074,12 +1079,25 @@ class VeltrixApp:
         self.canvas.deselect()
         self.play_move(m, mover="human")
 
+    def _move_sound_kind(self, m: Move, san: str, before: Board) -> str:
+        if m.promo:
+            return "promote"
+        if m.castle:
+            return "castle"
+        if san.endswith(("+", "#")):
+            return "check"
+        if before.board[m.to] != "." or m.ep:
+            return "capture"
+        return "move"
+
     def play_move(self, m: Move, mover="human"):
+        before_board = self.state.board.copy()
         moved_color = self.state.board.stm
         if not self.state.at_end:
             # playing from a rewound position: engine "future" is abandoned
             self._go_serial.clear()
         san = self.state.push(m)
+        self.soundboard.play(self._move_sound_kind(m, san, before_board))
         # apply increment to the side that just moved
         if self.clocks[moved_color] != float("inf"):
             self.clocks[moved_color] += self.incs[moved_color]
@@ -1145,6 +1163,7 @@ class VeltrixApp:
         out = self.board.outcome()
         if out:
             self.result = out
+            self.soundboard.play("end")
             self.status(f"game over: {out[0]} - {out[1]}")
             self.clock_active = False
             if self.mode == "engine_vs_engine":
@@ -1162,6 +1181,7 @@ class VeltrixApp:
         if self.mode == "human_vs_engine" or self.mode == "human_vs_human":
             winner = "0-1" if self.board.stm == "w" else "1-0"
             self.result = (winner, "resignation")
+            self.soundboard.play("end")
             self.status(f"game over: {winner} - resignation")
             self.clock_active = False
             self._sync_board_widget()
@@ -1182,6 +1202,7 @@ class VeltrixApp:
                     self.clocks[stm] = 0
                     winner = "0-1" if stm == "w" else "1-0"
                     self.result = (winner, "time out")
+                    self.soundboard.play("end")
                     self.status(f"game over: {winner} - flag fall")
                     self.clock_active = False
                     self._sync_board_widget()
